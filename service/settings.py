@@ -23,6 +23,7 @@ DEFAULT_APP_NAME = "QYH-GD300 故障定位系统"
 APP_VERSION = "v0.1"
 MAX_APP_NAME = 32
 FILE_NAME = "settings.json"
+ACTIVE_SCHEME_KEY = "active_scheme"        # 当前激活的自定义方案名
 
 _lock = threading.Lock()
 
@@ -120,3 +121,21 @@ def save_app_name(raw: object) -> str:
     name = normalize_app_name(raw)
     update_settings({"app_name": name})
     return name
+
+
+def read_active_scheme(default: str = "") -> str:
+    """读取当前激活方案名；缺失/非法时返回 default。"""
+    value = read_settings().get(ACTIVE_SCHEME_KEY)
+    if isinstance(value, str) and value.strip():
+        return value.strip()[:MAX_APP_NAME]
+    return default
+
+
+def save_active_scheme(name: object) -> str:
+    """合并写入当前激活方案名（不覆盖其余键）；非法名抛 ValueError。"""
+    text = str(name or "").strip()
+    if not text:
+        raise ValueError("方案名不能为空")
+    text = text[:MAX_APP_NAME]
+    update_settings({ACTIVE_SCHEME_KEY: text})
+    return text

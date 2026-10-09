@@ -178,3 +178,32 @@ def describe(layout: Layout, cfg: dict[str, Any], source: str) -> dict[str, Any]
             "byte_order": layout.byte_order,
         },
     }
+
+
+# ------------------------------------------------------------------ 方案 ↔ 布局
+# 第一批起，界面上的"帧格式"改由自定义方案（service/schema.py）承载；
+# 下面两个函数把方案的 frame 段翻译成上面这套既有形态（布局 + 配置），
+# 从而让协议层与 describe() 不必改动，旧配置（settings.json 的 "layout"）也仍能读。
+def cfg_from_scheme(scheme: Any) -> dict[str, Any]:
+    """方案 → 旧版 layout 配置形态 {"mode","base","custom"}。"""
+    frame = scheme.frame if isinstance(getattr(scheme, "frame", None), dict) else {}
+    if str(frame.get("kind", "text")).lower() == "text":
+        return {"mode": MODE_TEXT, "base": MODE_PRESETS[0], "custom": dict(CUSTOM_DEFAULTS)}
+    mode = str(frame.get("mode", "")).strip().lower()
+    base = str(frame.get("base", "")).strip().lower()
+    return {
+        "mode": mode if mode in MODES else MODE_PRESETS[0],
+        "base": base if base in MODE_PRESETS else MODE_PRESETS[0],
+        "custom": _normalize_custom(frame.get("custom")),
+    }
+
+
+def layout_from_scheme(scheme: Any) -> Layout:
+    """方案 → 解析布局：text 返回文本伪布局；binary 按 frame 常数构造定长帧布局。
+
+    常数非法时抛 ValueError（调用方负责提示）；字段表的编辑不影响切帧参数。
+    """
+    frame = scheme.frame if isinstance(getattr(scheme, "frame", None), dict) else {}
+    if str(frame.get("kind", "text")).lower() == "text":
+        return TEXT_LAYOUT
+    return layout_from_config(cfg_from_scheme(scheme))
