@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>QYH-GD300 故障定位系统 v0.1</title>
+<style>
+  :root {
+    --bg-app: #12161F;
+    --bg-panel: #1A2030;
+    --border: #2C3549;
+    --text-primary: #E8ECF4;
+    --text-secondary: #8A94A8;
+    --accent: #2E7CF6;
+    --status-normal: #22C55E;
+    --status-alarm: #EF4444;
+    --offline: #6B7280;
+    --mono: "Cascadia Mono", "Consolas", "JetBrains Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg-app);
+    color: var(--text-primary);
+    font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    font-size: 13px;
+    overflow: hidden;
+  }
+  .app { display: flex; flex-direction: column; height: 100vh; padding: 14px; gap: 12px; }
+
+  /* ---------- 顶栏 ---------- */
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 12px 16px; flex: 0 0 auto;
+  }
+  .brand { display: flex; align-items: baseline; gap: 10px; }
+  .brand .title { font-size: 15px; font-weight: 600; }
+  .brand .ver { color: var(--text-secondary); font-family: var(--mono); font-size: 12px; }
+  .topbar-right { display: flex; align-items: center; gap: 12px; }
+  .conn { display: flex; align-items: center; gap: 10px; }
+  .badge {
+    font-family: var(--mono); font-size: 12px; padding: 3px 10px;
+    border-radius: 999px; border: 1px solid currentColor;
+  }
+  .badge.searching { color: var(--accent); }
+  .badge.locked { color: var(--status-normal); }
+  .badge.offline { color: var(--offline); }
+  .port { font-family: var(--mono); font-size: 15px; font-weight: 600; min-width: 5ch; }
+  .tag {
+    font-family: var(--mono); font-size: 11px; color: var(--text-secondary);
+    border: 1px dashed var(--border); border-radius: 4px; padding: 2px 8px;
+  }
+  .tag.mock { color: var(--status-normal); border-color: var(--status-normal); }
+  .hidden { display: none !important; }
+
+  /* ---------- 统计卡 ---------- */
+  .stats {
+    display: grid; grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 12px; flex: 0 0 auto;
+  }
+  .stat {
+    background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px 14px; min-width: 0;
+  }
+  .stat label { display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px; }
+  .stat b {
+    font-family: var(--mono); font-size: 20px; font-weight: 600;
+    display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .stat b.small { font-size: 15px; }
+  .stat b.dim { color: var(--text-secondary); }
+
+  /* ---------- 数据面板 ---------- */
+  .panel {
+    flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
+    background: var(--bg-panel); border: 1px solid var(--border); border-radius: 8px;
+  }
+  .panel-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; border-bottom: 1px solid var(--border); flex: 0 0 auto;
+  }
+  .panel-head .caption { color: var(--text-secondary); }
+  .actions { display: flex; gap: 8px; }
+  button {
+    background: transparent; color: var(--text-primary); cursor: pointer;
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 5px 14px; font-size: 12px; font-family: inherit;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.active { border-color: var(--status-alarm); color: var(--status-alarm); }
+
+  .hex {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 10px 14px;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.55;
+    white-space: pre;
+  }
+  .row { display: flex; gap: 14px; }
+  .row .off { color: var(--text-secondary); width: 8ch; flex: 0 0 auto; }
+  .row .hexs { color: var(--text-primary); width: 47ch; flex: 0 0 auto; }
+  .row .asc { color: var(--status-normal); width: 18ch; flex: 0 0 auto; }
+  .row .asc.mono { color: var(--status-normal); }
+  .empty { color: var(--text-secondary); }
+  .hex::-webkit-scrollbar { width: 10px; }
+  .hex::-webkit-scrollbar-track { background: var(--bg-app); }
+  .hex::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+
+  /* ---------- 结构化采样帧 ---------- */
+  .frames-panel { flex: 0 0 auto; height: 208px; }
+  .frames-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
+  .frames-wrap table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12px; }
+  .frames-wrap th, .frames-wrap td {
+    padding: 3px 10px; text-align: left; white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+  }
+  .frames-wrap th {
+    position: sticky; top: 0; background: var(--bg-panel);
+    color: var(--text-secondary); font-weight: 500;
+  }
+  .frames-wrap .empty { padding: 8px 10px; }
+  .proto-stats { font-family: var(--mono); font-size: 12px; color: var(--text-secondary); }
+  .frames-wrap::-webkit-scrollbar { width: 10px; height: 10px; }
+  .frames-wrap::-webkit-scrollbar-track { background: var(--bg-app); }
+  .frames-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+
+  /* ---------- 事件条 ---------- */
+  .events {
+    flex: 0 0 auto; background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 14px; height: 74px; overflow: hidden;
+    font-family: var(--mono); font-size: 12px; color: var(--text-secondary);
+  }
+  .events div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .events .t { color: var(--text-secondary); margin-right: 8px; }
+
+  /* ---------- 设置弹窗 ---------- */
+  .mask {
+    position: fixed; inset: 0; background: rgba(6, 9, 14, .66);
+    display: flex; align-items: center; justify-content: center; z-index: 10;
+  }
+  .dialog {
+    width: 440px; background: var(--bg-panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .dialog-head {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 14px; font-weight: 600;
+  }
+  .field-label { display: block; color: var(--text-secondary); font-size: 12px; margin-bottom: 6px; }
+  .dialog input[type="text"], .dialog input[type="number"] {
+    width: 100%; background: var(--bg-app); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+    font-family: inherit; font-size: 13px;
+  }
+  .dialog select {
+    width: 100%; background: var(--bg-app); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+    font-family: inherit; font-size: 13px;
+  }
+  .field-row { display: flex; gap: 8px; align-items: flex-start; }
+  .field-row .grow { flex: 1 1 0; min-width: 0; }
+  .field-note { color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
+  .layout-custom { display: flex; flex-direction: column; gap: 8px; }
+  .dialog input[type="text"]:focus, .dialog input[type="number"]:focus,
+  .dialog select:focus { outline: none; border-color: var(--accent); }
+  .hint { color: var(--text-secondary); font-size: 12px; margin-top: 6px; }
+  .hint.ok { color: var(--status-normal); }
+  .hint.error { color: var(--status-alarm); }
+  .dialog-foot { display: flex; gap: 8px; }
+  #btnResetName { margin-right: auto; }
+  #btnSaveLayout { margin-left: auto; }
+  .dialog-sep { height: 1px; background: var(--border); margin: 2px 0; }
+  button.primary { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="title" id="appTitle">QYH-GD300 故障定位系统</span>
+      <span class="ver" id="appVersion">v0.1</span>
+    </div>
+    <div class="topbar-right">
+      <div class="conn">
+        <span id="tagMock" class="tag mock hidden">模拟数据源</span>
+        <span id="tagScan" class="tag hidden"></span>
+        <span id="badge" class="badge offline">未连接</span>
+        <span id="portName" class="port">--</span>
+      </div>
+      <button id="btnSettings">设置</button>
+    </div>
+  </header>
+
+  <section class="stats">
+    <div class="stat"><label>累计字节</label><b id="sTotal">0</b></div>
+    <div class="stat"><label>当前速率 (B/s)</label><b id="sRate">0.0</b></div>
+    <div class="stat"><label>本窗口字节</label><b id="sWindow">0</b></div>
+    <div class="stat"><label>疑似帧头</label><b id="sHead" class="dim small">--</b></div>
+    <div class="stat"><label>疑似帧长 (字节)</label><b id="sLen" class="dim small">--</b></div>
+    <div class="stat"><label>高频 2 字节组合</label><b id="sPairs" class="dim small">--</b></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <span class="caption">原始数据流（HEX / ASCII 原始字节）</span>
+      <div class="actions">
+        <button id="btnPause">暂停</button>
+        <button id="btnClear">清屏</button>
+      </div>
+    </div>
+    <div id="hexPane" class="hex"><div class="empty">等待数据……</div></div>
+  </section>
+
+  <section class="panel frames-panel">
+    <div class="panel-head">
+      <span class="caption">结构化采样帧 <span id="protoLayout" class="tag"></span></span>
+      <span id="protoStats" class="proto-stats"></span>
+    </div>
+    <div id="framesWrap" class="frames-wrap">
+      <table>
+        <thead><tr id="frameHead"></tr></thead>
+        <tbody id="frameBody"><tr><td class="empty">等待帧……</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer id="evtLog" class="events"></footer>
+</div>
+
+<div id="settingsMask" class="mask hidden">
+  <div class="dialog">
+    <div class="dialog-head">
+      <span>设置</span>
+      <button id="btnCloseSettings">关闭</button>
+    </div>
+    <div>
+      <label class="field-label" for="inpAppName">系统名称</label>
+      <input id="inpAppName" type="text" maxlength="32" autocomplete="off"
+             placeholder="QYH-GD300 故障定位系统" />
+      <div id="nameHint" class="hint">最多 32 个字符，保存后立即生效并写入本地配置</div>
+    </div>
+    <div class="dialog-foot">
+      <button id="btnResetName">恢复默认</button>
+      <button id="btnSaveName" class="primary">保存</button>
+    </div>
+
+    <div class="dialog-sep"></div>
+    <div>
+      <label class="field-label" for="selLayoutMode">帧格式（上行帧布局）</label>
+      <select id="selLayoutMode">
+        <option value="text">ASCII 文本行（数值 Hz）</option>
+        <option value="25">25 字节 / 设计文档 3.3</option>
+        <option value="14">14 字节 / 评估报告 7.1</option>
+        <option value="custom">自定义…</option>
+      </select>
+      <div id="layoutCustom" class="layout-custom hidden">
+        <div class="field-row">
+          <div class="grow">
+            <label class="field-label" for="selLayoutBase">字段表基准</label>
+            <select id="selLayoutBase">
+              <option value="25">25 字节</option>
+              <option value="14">14 字节</option>
+            </select>
+          </div>
+          <div class="grow">
+            <label class="field-label" for="selCrcOrder">CRC 字节序</label>
+            <select id="selCrcOrder">
+              <option value="little">低字节在前</option>
+              <option value="big">高字节在前</option>
+            </select>
+          </div>
+          <div class="grow">
+            <label class="field-label" for="selByteOrder">字段字节序</label>
+            <select id="selByteOrder">
+              <option value="big">大端</option>
+              <option value="little">小端</option>
+            </select>
+          </div>
+        </div>
+        <div class="field-row">
+          <div class="grow">
+            <label class="field-label" for="inpFrameLen">帧长（字节）</label>
+            <input id="inpFrameLen" type="number" min="4" max="4096" step="1" />
+          </div>
+          <div class="grow">
+            <label class="field-label" for="inpCrcOffset">CRC 偏移</label>
+            <input id="inpCrcOffset" type="number" min="2" max="4094" step="1" />
+          </div>
+          <div class="grow">
+            <label class="field-label" for="inpCrcCovers">CRC 覆盖（字节）</label>
+            <input id="inpCrcCovers" type="number" min="1" max="4094" step="1" />
+          </div>
+        </div>
+      </div>
+      <div id="layoutHint" class="hint"></div>
+    </div>
+    <div class="dialog-foot">
+      <button id="btnSaveLayout" class="primary">应用帧格式</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var MAX_ROWS = 500;
+  var ROW_BYTES = 16;
+  var MAX_FRAMES = 200;
+
+  var pane = document.getElementById("hexPane");
+  var evtLog = document.getElementById("evtLog");
+  var badge = document.getElementById("badge");
+  var portName = document.getElementById("portName");
+  var tagScan = document.getElementById("tagScan");
+  var tagMock = document.getElementById("tagMock");
+  var btnPause = document.getElementById("btnPause");
+  var btnClear = document.getElementById("btnClear");
+  var appTitle = document.getElementById("appTitle");
+  var appVersion = document.getElementById("appVersion");
+  var btnSettings = document.getElementById("btnSettings");
+  var settingsMask = document.getElementById("settingsMask");
+  var inpAppName = document.getElementById("inpAppName");
+  var nameHint = document.getElementById("nameHint");
+  var btnSaveName = document.getElementById("btnSaveName");
+  var btnResetName = document.getElementById("btnResetName");
+  var btnCloseSettings = document.getElementById("btnCloseSettings");
+  var protoLayout = document.getElementById("protoLayout");
+  var protoStats = document.getElementById("protoStats");
+  var frameHead = document.getElementById("frameHead");
+  var frameBody = document.getElementById("frameBody");
+  var framesWrap = document.getElementById("framesWrap");
+  var selLayoutMode = document.getElementById("selLayoutMode");
+  var selLayoutBase = document.getElementById("selLayoutBase");
+  var selCrcOrder = document.getElementById("selCrcOrder");
+  var selByteOrder = document.getElementById("selByteOrder");
+  var inpFrameLen = document.getElementById("inpFrameLen");
+  var inpCrcOffset = document.getElementById("inpCrcOffset");
+  var inpCrcCovers = document.getElementById("inpCrcCovers");
+  var layoutCustom = document.getElementById("layoutCustom");
+  var layoutHint = document.getElementById("layoutHint");
+  var btnSaveLayout = document.getElementById("btnSaveLayout");
+
+  var APP_VERSION = "v0.1";
+  var DEFAULT_APP_NAME = "QYH-GD300 故障定位系统";
+  var MAX_APP_NAME = 32;
+  var currentName = DEFAULT_APP_NAME;
+
+  var buf = new Uint8Array(0);   // 尚未成行的尾部字节
+  var rowOffset = 0;             // buf[0] 在全局字节流中的绝对偏移
+  var dirty = false;
+  var paused = false;
+  var hasRows = false;
+
+  /* ---------------- 渲染 ---------------- */
+  function hex2(n) { return (n < 16 ? "0" : "") + n.toString(16).toUpperCase(); }
+
+  function render() {
+    var rows = Math.floor(buf.length / ROW_BYTES);
+    if (rows <= 0) return;
+
+    if (!hasRows) { pane.innerHTML = ""; hasRows = true; }
+
+    var frag = document.createDocumentFragment();
+    var parts, i, b;
+
+    for (var r = 0; r < rows; r++) {
+      parts = [];
+      var asc = "";
+      for (i = 0; i < ROW_BYTES; i++) {
+        b = buf[r * ROW_BYTES + i];
+        parts.push(hex2(b));
+        asc += (b >= 32 && b < 127) ? String.fromCharCode(b) : ".";
+      }
+      var row = document.createElement("div");
+      row.className = "row";
+
+      var off = document.createElement("span");
+      off.className = "off";
+      off.textContent = ("00000000" + (rowOffset + r * ROW_BYTES).toString(16).toUpperCase())
+        .slice(-8);
+      row.appendChild(off);
+
+      var hexs = document.createElement("span");
+      hexs.className = "hexs";
+      hexs.textContent = parts.join(" ");
+      row.appendChild(hexs);
+
+      var ascEl = document.createElement("span");
+      ascEl.className = "asc";
+      ascEl.textContent = "|" + asc + "|";
+      row.appendChild(ascEl);
+
+      frag.appendChild(row);
+    }
+
+    pane.appendChild(frag);
+    buf = buf.slice(rows * ROW_BYTES);
+    rowOffset += rows * ROW_BYTES;
+
+    while (pane.childElementCount > MAX_ROWS) pane.removeChild(pane.firstChild);
+    var nearBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 120;
+    if (nearBottom) pane.scrollTop = pane.scrollHeight;
+  }
+
+  function tick() {
+    if (dirty && !paused) { dirty = false; render(); }
+    requestAnimationFrame(tick);
+  }
+
+  /* ---------------- 数据接入 ---------------- */
+  function appendHex(hexStr) {
+    if (paused || !hexStr) return;
+    var n = hexStr.length >> 1;
+    var chunk = new Uint8Array(n);
+    for (var i = 0; i < n; i++) chunk[i] = parseInt(hexStr.substr(i * 2, 2), 16);
+    var merged = new Uint8Array(buf.length + n);
+    merged.set(buf, 0);
+    merged.set(chunk, buf.length);
+    buf = merged;
+    dirty = true;
+  }
+
+  /* ---------------- 状态刷新 ---------------- */
+  function fmt(n) { return (n || 0).toLocaleString("en-US"); }
+
+  function updateStatus(s) {
+    if (s.mock) tagMock.classList.remove("hidden");
+
+    if (s.state === "locked") {
+      badge.className = "badge locked";
+      badge.textContent = "已锁定";
+      portName.textContent = s.port || "--";
+      tagScan.classList.add("hidden");
+    } else {
+      badge.className = "badge searching";
+      badge.textContent = "搜索中";
+      portName.textContent = "--";
+      if (s.scan) {
+        tagScan.classList.remove("hidden");
+        tagScan.textContent = "扫描 " + s.scan.index + "/" + s.scan.total + " : " + s.scan.port;
+      } else {
+        tagScan.classList.remove("hidden");
+        tagScan.textContent = "无可用串口";
+      }
+    }
+
+    document.getElementById("sTotal").textContent = fmt(s.total_bytes);
+    document.getElementById("sRate").textContent = (s.rate || 0).toFixed(1);
+    document.getElementById("sWindow").textContent = fmt(s.window_bytes);
+
+    setField("sHead", s.frame_head || "--");
+    setField("sLen", s.frame_len != null ? String(s.frame_len) : "--");
+
+    var pairs = (s.top_pairs || []).slice(0, 2)
+      .map(function (p) { return p.pair + "×" + p.count; }).join("  ");
+    setField("sPairs", pairs || "--");
+  }
+
+  function setField(id, text) {
+    var el = document.getElementById(id);
+    el.textContent = text;
+    el.className = (text === "--") ? "dim small" : "small";
+  }
+
+  function pushEvent(text) {
+    var line = document.createElement("div");
+    var t = new Date().toLocaleTimeString("zh-CN", { hour12: false });
+    line.innerHTML = '<span class="t">' + t + "</span>";
+    line.appendChild(document.createTextNode(text));
+    evtLog.appendChild(line);
+    while (evtLog.childElementCount > 4) evtLog.removeChild(evtLog.firstChild);
+  }
+
+  /* ---------------- 交互 ---------------- */
+  btnPause.addEventListener("click", function () {
+    paused = !paused;
+    btnPause.textContent = paused ? "继续" : "暂停";
+    btnPause.classList.toggle("active", paused);
+  });
+
+  btnClear.addEventListener("click", function () {
+    pane.innerHTML = "";
+    hasRows = true;
+    resetFrameTable();
+  });
+
+  /* ---------------- 结构化采样帧 ---------------- */
+  var frameCount = 0;
+  var frameCols = "";
+  var frameRevKey = null;    // 链路+布局+版本号：任一变化都说明表格口径变了，旧行必须清掉
+
+  function setColumns(cols) {
+    if (!cols || !cols.length) return;
+    var key = cols.join("|");
+    if (key === frameCols) return;          // 列名不变就别重建表头（含列数相同的换布局）
+    frameCols = key;
+    frameHead.innerHTML = "";
+    cols.forEach(function (c) {
+      var th = document.createElement("th");
+      th.textContent = c;
+      frameHead.appendChild(th);
+    });
+  }
+
+  function resetFrameTable() {
+    frameBody.innerHTML = '<tr><td class="empty">等待帧……</td></tr>';
+    frameCount = 0;
+  }
+
+  function updateProtoStats(s) {
+    if (!s) return;
+    var key = (s.kind || "") + "|" + (s.layout || "") + "|" + s.rev;
+    if (frameRevKey !== null && key !== frameRevKey) resetFrameTable();
+    frameRevKey = key;
+    protoLayout.textContent = s.layout_title || ("布局 " + s.layout);
+    if (s.kind === "text") {
+      // 文本链路没有 CRC / 重同步概念：统计条按"行"的口径显示
+      protoStats.textContent = "有效行 " + fmt(s.frames_ok) + " ｜ 无效行 " + fmt(s.crc_err)
+        + " ｜ 丢弃字节 " + fmt(s.bytes_dropped) + " ｜ 待切 " + (s.pending || 0);
+    } else {
+      protoStats.textContent = "有效帧 " + fmt(s.frames_ok) + " ｜ CRC 错 " + fmt(s.crc_err)
+        + " ｜ 重同步 " + fmt(s.resync) + " ｜ 丢弃字节 " + fmt(s.bytes_dropped)
+        + " ｜ 待切 " + (s.pending || 0);
+    }
+    setColumns(s.columns);
+  }
+
+  function appendFrames(items) {
+    if (!items || !items.length) return;
+    if (!frameCount) frameBody.innerHTML = "";
+
+    var nearBottom = framesWrap.scrollHeight - framesWrap.scrollTop - framesWrap.clientHeight < 40;
+    var frag = document.createDocumentFragment();
+    items.forEach(function (f) {
+      var tr = document.createElement("tr");
+      (f.cells || []).forEach(function (v) {
+        var td = document.createElement("td");
+        td.textContent = v;
+        tr.appendChild(td);
+      });
+      frag.appendChild(tr);
+      frameCount++;
+    });
+    frameBody.appendChild(frag);
+    while (frameBody.childElementCount > MAX_FRAMES) frameBody.removeChild(frameBody.firstChild);
+    if (nearBottom) framesWrap.scrollTop = framesWrap.scrollHeight;
+  }
+
+  function loadProtocol() {
+    fetch("/api/protocol").then(function (r) { return r.json(); })
+      .then(function (s) {
+        updateProtoStats(s);
+        appendFrames(s.recent);
+      })
+      .catch(function () {});
+  }
+
+  /* ---------------- 系统名称 / 设置 ---------------- */
+  function applyAppName(name) {
+    currentName = name;
+    appTitle.textContent = name;
+    appVersion.textContent = APP_VERSION;
+    document.title = name + " " + APP_VERSION;
+    syncWindowTitle(name);
+  }
+
+  // 桌面端（pywebview）把名称同步到原生窗口标题栏；浏览器里无此接口，直接跳过
+  function syncWindowTitle(name) {
+    try {
+      var api = window.pywebview && window.pywebview.api;
+      if (api && api.set_app_title) api.set_app_title(name);
+    } catch (e) { /* 浏览器环境，忽略 */ }
+  }
+
+  // pywebview 的 api 在页面加载后才注入，ready 时补一次同步
+  window.addEventListener("pywebviewready", function () { syncWindowTitle(currentName); });
+
+  function setHint(text, kind) {
+    nameHint.textContent = text;
+    nameHint.className = "hint" + (kind ? " " + kind : "");
+  }
+
+  function openSettings() {
+    inpAppName.value = currentName;
+    setHint("最多 " + MAX_APP_NAME + " 个字符，保存后立即生效并写入本地配置", "");
+    fetchLayoutView();
+    settingsMask.classList.remove("hidden");
+    inpAppName.focus();
+    inpAppName.select();
+  }
+
+  function closeSettings() { settingsMask.classList.add("hidden"); }
+
+  btnSettings.addEventListener("click", openSettings);
+  btnCloseSettings.addEventListener("click", closeSettings);
+  settingsMask.addEventListener("click", function (e) {
+    if (e.target === settingsMask) closeSettings();      // 点击遮罩关闭
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !settingsMask.classList.contains("hidden")) closeSettings();
+  });
+
+  btnResetName.addEventListener("click", function () {
+    inpAppName.value = DEFAULT_APP_NAME;
+    setHint("已填入默认名称，点“保存”后生效", "");
+  });
+
+  btnSaveName.addEventListener("click", function () {
+    btnSaveName.disabled = true;
+    fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ app_name: inpAppName.value })
+    }).then(function (r) { return r.json(); })
+      .then(function (body) {
+        if (!body.ok) { setHint(body.error || "保存失败", "error"); return; }
+        applyAppName(body.app_name);
+        inpAppName.value = body.app_name;
+        setHint("已保存，界面与窗口标题栏已同步", "ok");
+        pushEvent("系统名称已改为「" + body.app_name + "」");
+        setTimeout(closeSettings, 700);
+      })
+      .catch(function () { setHint("保存失败：本地服务不可用", "error"); })
+      .then(function () { btnSaveName.disabled = false; });
+  });
+
+  /* ---------------- 帧格式配置 ---------------- */
+  function layoutToView(v) {
+    if (!v) return;
+    selLayoutMode.value = v.mode || "25";
+    selLayoutBase.value = v.base || "25";
+    var c = v.custom || {};
+    selCrcOrder.value = c.crc_order || "little";
+    selByteOrder.value = c.byte_order || "big";
+    inpFrameLen.value = c.frame_len != null ? c.frame_len : "";
+    inpCrcOffset.value = c.crc_offset != null ? c.crc_offset : "";
+    inpCrcCovers.value = c.covers != null ? c.covers : "";
+    layoutCustom.classList.toggle("hidden", selLayoutMode.value !== "custom");
+    var e = v.effective || {};
+    var note = e.note || "";
+    layoutHint.textContent = note;
+    layoutHint.className = "hint";
+    if (v.source === "cli") layoutHint.textContent = "当前由启动参数指定（--proto），界面改动不生效，请重启程序";
+  }
+
+  function fetchLayoutView() {
+    fetch("/api/settings").then(function (r) { return r.json(); })
+      .then(function (s) { layoutToView(s.layout); })
+      .catch(function () { layoutHint.textContent = "读取帧格式失败：本地服务不可用"; layoutHint.className = "hint error"; });
+  }
+
+  function readLayoutPayload() {
+    var payload = { mode: selLayoutMode.value };
+    if (selLayoutMode.value === "custom") {
+      payload.base = selLayoutBase.value;
+      payload.custom = {
+        frame_len: inpFrameLen.value,
+        crc_offset: inpCrcOffset.value,
+        covers: inpCrcCovers.value,
+        crc_order: selCrcOrder.value,
+        byte_order: selByteOrder.value
+      };
+    }
+    return payload;
+  }
+
+  function setLayoutHint(text, kind) {
+    layoutHint.textContent = text;
+    layoutHint.className = "hint" + (kind ? " " + kind : "");
+  }
+
+  selLayoutMode.addEventListener("change", function () {
+    layoutCustom.classList.toggle("hidden", selLayoutMode.value !== "custom");
+    if (selLayoutMode.value !== "custom") setLayoutHint("", "");
+  });
+
+  btnSaveLayout.addEventListener("click", function () {
+    btnSaveLayout.disabled = true;
+    fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ layout: readLayoutPayload() })
+    }).then(function (r) { return r.json(); })
+      .then(function (body) {
+        if (!body.ok) {
+          setLayoutHint(body.error || "应用失败", "error");
+          return;
+        }
+        var v = body.layout || {};
+        layoutToView(v);
+        // 事件条由服务端广播的 layout 消息统一记录，这里不重复写
+        setLayoutHint("已应用：" + (v.effective && v.effective.title ? v.effective.title : ""), "ok");
+        setTimeout(closeSettings, 900);
+      })
+      .catch(function () { setLayoutHint("应用失败：本地服务不可用", "error"); })
+      .then(function () { btnSaveLayout.disabled = false; });
+  });
+
+  function loadSettings() {
+    fetch("/api/settings").then(function (r) { return r.json(); })
+      .then(function (s) {
+        if (s.version) APP_VERSION = s.version;
+        if (s.default_name) DEFAULT_APP_NAME = s.default_name;
+        if (s.max_len) { MAX_APP_NAME = s.max_len; inpAppName.maxLength = s.max_len; }
+        applyAppName(s.app_name || DEFAULT_APP_NAME);
+      })
+      .catch(function () { applyAppName(DEFAULT_APP_NAME); });
+  }
+
+  /* ---------------- 连接 ---------------- */
+  function connect() {
+    var ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://")
+      + location.host + "/ws");
+
+    ws.onopen = function () { pushEvent("已连接到本地服务"); };
+
+    ws.onmessage = function (ev) {
+      var m;
+      try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.type === "data") appendHex(m.hex);
+      else if (m.type === "status") updateStatus(m);
+      else if (m.type === "frames") { appendFrames(m.items); updateProtoStats(m.stats); }
+      else if (m.type === "layout") { updateProtoStats(m.stats); pushEvent(m.text); }
+      else if (m.type === "event") pushEvent(m.text);
+    };
+
+    ws.onclose = function () {
+      badge.className = "badge offline";
+      badge.textContent = "未连接";
+      pushEvent("与服务断开，正在重连…");
+      setTimeout(connect, 1000);
+    };
+  }
+
+  fetch("/api/status").then(function (r) { return r.json(); })
+    .then(updateStatus).catch(function () {});
+  loadSettings();
+  loadProtocol();
+  connect();
+  requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

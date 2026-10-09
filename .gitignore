@@ -1,0 +1,23 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ---- PyInstaller / 打包中间产物 ----
+build/pyinstaller-work/
+build/dist/*.exe
+
+# ---- 浏览器自动化临时配置（Playwright/Edge 缓存） ----
+build/edge-profile/
+
+# ---- 运行时日志与本地配置（每台机器不同，不入库） ----
+/settings.json
+gd300.log
+*.log
+
+# ---- 编辑器 ----
+.vscode/
+.idea/

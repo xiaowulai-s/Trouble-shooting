@@ -1,0 +1,14 @@
+{
+  "app_name": "QYH-GD300 故障定位系统",
+  "layout": {
+    "mode": "text",
+    "base": "25",
+    "custom": {
+      "frame_len": 25,
+      "crc_offset": 23,
+      "covers": 23,
+      "crc_order": "little",
+      "byte_order": "big"
+    }
+  }
+}
