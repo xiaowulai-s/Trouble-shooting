@@ -11,14 +11,17 @@
     · 线性换算 y = k·x + b
     · 按小数位格式化
 
-第二批（此处已预留签名，暂以"原值透传"占位）：
-    · 滤波：不滤波 / 滑动平均 / 中值 / 一阶低通
-    · 报警判据：上限 / 下限 + 去抖 + 滞回
+第二批已实现：
+    · 滤波：不滤波 / 滑动平均 / 中值 / 一阶低通（逐字段独立、各自维护历史）
+    · 报警判据：上限 / 下限 + 去抖 + 滞回 + 自动解警
+    · 报警事件：状态跳变时产出结构化事件，供业务层入库与推送界面
 """
 
 from __future__ import annotations
 
+import statistics
 import struct
+from collections import deque
 from typing import Any, Iterable, Optional
 
 from service.protocol import _ts_text
@@ -114,26 +117,196 @@ def column_label(field: Any) -> str:
     return f"{name}({unit})" if unit else name
 
 
+def hist_capacity(spec: Any) -> int:
+    """按滤波器类型给出需要保留的历史长度（deque 上限）。"""
+    data = spec if isinstance(spec, dict) else {}
+    ftype = str(data.get("type", "none")).strip().lower()
+    if ftype in ("moving_avg", "median"):
+        return max(1, min(999, _as_int(data.get("window"), 5)))
+    if ftype == "low_pass":
+        return 512                       # 一阶低通的"记忆"越长越平滑，取一个够用的上限
+    return 1
+
+
 def apply_filter(series: Iterable[float], spec: Any) -> Optional[float]:
-    """第二批：对一串样本做滤波，返回最新平滑值（当前为原值透传占位）。"""
-    values = [v for v in series if isinstance(v, (int, float)) and not isinstance(v, bool)]
-    return values[-1] if values else None
+    """对一串按时间升序的样本做滤波，返回最新的平滑值。
+
+    spec = {"type": none|moving_avg|median|low_pass, "window": int, "alpha": float}
+      · none       原值透传
+      · moving_avg 最近 window 个样本的算术平均
+      · median     最近 window 个样本的中位数（抑制脉冲噪声）
+      · low_pass   一阶 IIR：y = α·x + (1-α)·y，α 越小越平滑
+    无有效样本返回 None。
+    """
+    values = [float(v) for v in series
+              if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not values:
+        return None
+    data = spec if isinstance(spec, dict) else {}
+    ftype = str(data.get("type", "none")).strip().lower()
+    if ftype == "moving_avg":
+        window = values[-max(1, min(999, _as_int(data.get("window"), 5))):]
+        return sum(window) / len(window)
+    if ftype == "median":
+        window = values[-max(1, min(999, _as_int(data.get("window"), 5))):]
+        return float(statistics.median(window))
+    if ftype == "low_pass":
+        alpha = min(1.0, max(0.0, _as_float(data.get("alpha"), 0.2)))
+        y = values[0]
+        for x in values[1:]:
+            y = alpha * x + (1.0 - alpha) * y
+        return y
+    return values[-1]
 
 
-def judge_alarm(field: Any, value: Optional[float], state: Any = None) -> dict[str, Any]:
-    """第二批：上限/下限 + 去抖 + 滞回判据（当前恒返回"未报警"，仅占位）。"""
-    return {"level": None, "changed": False}
+def _judge_side(cfg: Any, sub: dict, value: float, ts: float,
+                is_high: bool, active: bool) -> Optional[str]:
+    """判定一"侧"阈值：返回 enter / exit / hold / pending / None。
+
+    · enter   ：满足进入条件且去抖时间已到
+    · exit    ：已在报警且已越过滞回带（可自动解警）
+    · hold    ：已在报警但仍在滞回带内（维持报警，防抖）
+    · pending ：已触阈但去抖时间未到
+    · None    ：正常
+    """
+    data = cfg if isinstance(cfg, dict) else {}
+    if not data.get("enabled"):
+        sub["pending"] = None
+        return None
+    limit = _as_float(data.get("limit"), 0.0)
+    hyst = abs(_as_float(data.get("hysteresis"), 0.0))
+    debounce = max(0.0, _as_float(data.get("debounce_s"), 0.0))
+    if is_high:
+        over = value >= limit                     # 进入条件
+        back = value <= limit - hyst              # 退出条件（滞回带下沿）
+    else:
+        over = value <= limit
+        back = value >= limit + hyst
+    if active:
+        sub["pending"] = None
+        return "exit" if back else "hold"
+    if not over:
+        sub["pending"] = None
+        return None
+    if debounce <= 0:
+        return "enter"
+    if sub.get("pending") is None:
+        sub["pending"] = ts
+    return "enter" if ts - sub["pending"] >= debounce else "pending"
+
+
+def judge_alarm(field: Any, value: Optional[float], state: Any, ts: float) -> dict[str, Any]:
+    """上限/下限 + 去抖 + 滞回 + 自动解警的判据（有状态，需逐帧调用）。
+
+    返回 {"level": None|"high"|"low", "changed": bool, "side": "high"|"low"|None,
+          "limit": float|None, "active": bool}
+      · level  当前报警级别（None 表示正常）
+      · changed 本次调用是否发生状态跳变（进入或解除）
+      · side   跳变发生在哪一侧（进入=触发侧，解除=原触发侧）
+    """
+    alarm = getattr(field, "alarm", None)
+    alarm = alarm if isinstance(alarm, dict) else {}
+    state = state if isinstance(state, dict) else {}
+    current = state.get("level")
+    if current not in ("high", "low"):
+        current = None
+
+    if value is None:                            # 本帧取不到值：维持现状，不误判
+        return {"level": current, "changed": False, "side": None,
+                "limit": None, "active": current is not None}
+
+    sub_high = state.setdefault("high", {"pending": None})
+    sub_low = state.setdefault("low", {"pending": None})
+
+    # 已在报警：先看原触发侧能否解除，再考虑另一侧；正常态：上限优先
+    order = [("high", True), ("low", False)] if current != "low" else [("low", False), ("high", True)]
+    level, changed, side, limit = current, False, None, None
+    for key, is_high in order:
+        cfg = alarm.get(key)
+        outcome = _judge_side(cfg, sub_high if is_high else sub_low, value, ts, is_high, current == key)
+        if outcome == "hold":
+            level = key
+            break
+        if outcome == "enter":
+            level, changed, side = key, True, key
+            limit = _as_float((cfg or {}).get("limit") if isinstance(cfg, dict) else 0.0, 0.0)
+            break
+        if outcome == "exit":
+            level, changed, side = None, True, key
+            limit = _as_float((cfg or {}).get("limit") if isinstance(cfg, dict) else 0.0, 0.0)
+            break
+        # None / pending：继续评估另一侧
+    state["level"] = level
+    return {"level": level, "changed": changed, "side": side,
+            "limit": limit, "active": level is not None}
+
+
+def alarm_event(field: Any, value: Optional[float], verdict: dict) -> dict[str, Any]:
+    """把一次报警状态跳变整理成结构化事件（供入库 + 推送界面）。"""
+    name = str(getattr(field, "name", "") or getattr(field, "id", ""))
+    unit = str(getattr(field, "unit", "") or "")
+    decimals = getattr(field, "decimals", 0)
+    side = verdict.get("side")
+    limit = verdict.get("limit")
+    if verdict.get("active"):
+        verb = "超过上限" if side == "high" else "低于下限"
+        text = f"{name} {verb} {format_number(limit, decimals)}{unit}"
+    else:
+        verb = "上限已恢复" if side == "high" else "下限已恢复"
+        text = (f"{name} {verb}（当前 "
+                f"{format_number(value, decimals)}{unit}）")
+    return {
+        "field": str(getattr(field, "id", "")),
+        "name": name,
+        "unit": unit,
+        "side": side,
+        "active": bool(verdict.get("active")),
+        "level": verdict.get("level"),
+        "value": value,
+        "limit": limit,
+        "decimals": int(decimals) if isinstance(decimals, int) else 0,
+        "text": text,
+    }
+
+
+def _as_float(value: Any, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _as_int(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 class Analyzer:
-    """字段表 → 换算结果。可在运行中热换字段表（切换方案时调用 set_fields）。"""
+    """字段表 → 换算结果。可在运行中热换字段表（切换方案时调用 set_fields）。
+
+    第二批起带状态：
+      · _hist    逐字段的"工程量"历史，供滤波取窗口（换字段表时清空）
+      · _alarms  逐字段的报警状态（去抖计时 / 当前级别），换字段表时一并清空
+    """
 
     def __init__(self, fields: Iterable[Any] = ()) -> None:
         self._fields: list[Any] = []
+        self._hist: dict[str, deque] = {}
+        self._alarms: dict[str, dict] = {}
         self.set_fields(fields)
 
     def set_fields(self, fields: Iterable[Any]) -> None:
+        """热换字段表：历史与报警状态一并清零（旧口径的状态对新字段无意义）。"""
         self._fields = list(fields or [])
+        self._hist = {}
+        self._alarms = {}
+
+    def reset(self) -> None:
+        """只清历史与报警状态，保留字段表（清屏/重新计时用）。"""
+        self._hist = {}
+        self._alarms = {}
 
     @property
     def fields(self) -> list[Any]:
@@ -147,26 +320,60 @@ class Analyzer:
                 cols.append(column_label(f))
         return cols
 
+    def _history(self, field: Any) -> deque:
+        """取（或按滤波类型新建）某字段的历史队列。"""
+        hist = self._hist.get(field.id)
+        if hist is None:
+            hist = deque(maxlen=hist_capacity(getattr(field, "filter", None)))
+            self._hist[field.id] = hist
+        return hist
+
     def process(self, ts: float, values: Optional[dict] = None,
                 raw: Optional[bytes] = None) -> dict[str, Any]:
-        """一帧 → {字段 id: {raw, value, text, name, unit}} + 表格行 cells。"""
+        """一帧 → {字段 id: {raw, value, text, name, unit, filtered, alarm}} + 表格行 cells。
+
+        · value：滤波后的工程量（制表 / 画曲线 / 判报警都用它）
+        · raw  ：协议层取到的原始值；value_raw 为未滤波的工程量（备查）
+        · alarms：本帧发生的报警状态跳变（进入/解除），供业务层入库与推送
+        """
         raws = extract_raw(self._fields, values, raw)
         fields_out: dict[str, Any] = {}
         cells = [_ts_text(ts)]
+        alarms: list[dict] = []
         for f in self._fields:
             rv = raws.get(f.id)
-            value = to_engineering(rv, getattr(f, "scale", None))
+            eng = to_engineering(rv, getattr(f, "scale", None))
+
+            fspec = getattr(f, "filter", None)
+            hist = self._history(f)
+            if eng is not None:
+                hist.append(eng)
+            ftype = str((fspec or {}).get("type", "none")).strip().lower() \
+                if isinstance(fspec, dict) else "none"
+            if ftype != "none" and hist:
+                value = apply_filter(list(hist), fspec)
+                filtered = True
+            else:
+                value = eng
+                filtered = False
+
             text = format_number(value, getattr(f, "decimals", 0))
+            verdict = judge_alarm(f, value, self._alarms.setdefault(f.id, {}), ts)
+            if verdict["changed"]:
+                alarms.append(alarm_event(f, value, verdict))
             fields_out[f.id] = {
                 "raw": rv,
                 "value": value,
+                "value_raw": eng,
                 "text": text,
+                "filtered": filtered,
+                "alarm": verdict["level"],
                 "name": str(getattr(f, "name", "") or f.id),
                 "unit": str(getattr(f, "unit", "") or ""),
             }
             if _visible(f).get("table", True):
                 cells.append(text)
-        return {"ts": ts, "fields": fields_out, "cells": cells}
+        return {"ts": ts, "fields": fields_out, "cells": cells, "alarms": alarms}
 
 
 def _visible(field: Any) -> dict:

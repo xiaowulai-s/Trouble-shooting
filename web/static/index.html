@@ -106,7 +106,7 @@
   .hex::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
 
   /* ---------- 结构化采样帧 ---------- */
-  .frames-panel { flex: 0 0 auto; height: 208px; }
+  .frames-panel { min-height: 0; }
   .frames-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; }
   .frames-wrap table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 12px; }
   .frames-wrap th, .frames-wrap td {
@@ -171,14 +171,72 @@
   .dialog-sep { height: 1px; background: var(--border); margin: 2px 0; }
   button.primary { border-color: var(--accent); color: var(--accent); }
 
-  /* ---------- 曲线面板（第一批仅预留布局，第二批实现绘制） ---------- */
-  .frames-panel { height: 176px; }
-  .curve-panel { flex: 1 1 auto; min-height: 120px; }
-  .curve-wrap {
-    flex: 1 1 auto; min-height: 0; display: flex; align-items: center;
-    justify-content: center; padding: 10px 14px; text-align: center;
-    color: var(--text-secondary); font-size: 12px;
+  /* ---------- 主区两栏 / 下区两栏（第二批重排） ---------- */
+  .mid { flex: 1 1 auto; min-height: 0; display: flex; gap: 12px; }
+  .mid > .panel { flex: 1 1 0; min-width: 0; }
+  .lower { flex: 0 0 auto; height: 196px; display: flex; gap: 12px; }
+  .lower > .panel { min-width: 0; }
+  .frames-panel { flex: 2 1 0; }
+  .alarm-panel { flex: 1 1 0; }
+  .curve-panel { flex: 1.2 1 0 !important; }
+
+  /* ---------- 曲线面板 ---------- */
+  .curve-wrap { position: relative; flex: 1 1 auto; min-height: 0; padding: 6px 8px 0; }
+  #curveCanvas { width: 100%; height: 100%; display: block; cursor: crosshair; }
+  .curve-tip {
+    position: absolute; z-index: 5; pointer-events: none;
+    background: rgba(12, 16, 24, .95); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 9px; font-family: var(--mono);
+    font-size: 11.5px; line-height: 1.55; white-space: nowrap;
   }
+  .curve-tip .k { color: var(--text-secondary); }
+  .curve-legend {
+    display: flex; flex-wrap: wrap; gap: 3px 14px; padding: 4px 12px 2px;
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-secondary);
+  }
+  .curve-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .curve-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .curve-tools {
+    display: flex; align-items: center; gap: 8px; padding: 2px 12px 8px;
+  }
+  .curve-tools input[type="range"] { flex: 1 1 auto; accent-color: var(--accent); min-width: 60px; }
+  .curve-tools .win { font-family: var(--mono); font-size: 11.5px; color: var(--text-secondary); white-space: nowrap; }
+
+  /* ---------- 报警列表 ---------- */
+  .alarm-wrap { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 4px 10px; }
+  .alarm-item {
+    display: flex; gap: 8px; padding: 4px 0; border-bottom: 1px dashed var(--border);
+    font-family: var(--mono); font-size: 11.5px;
+  }
+  .alarm-item .t { color: var(--text-secondary); flex: 0 0 auto; }
+  .alarm-item .msg { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .alarm-item.active .msg { color: var(--status-alarm); }
+  .alarm-item.clear .msg { color: var(--status-normal); }
+  .alarm-empty { color: var(--text-secondary); padding: 6px 0; }
+  .alarm-wrap::-webkit-scrollbar { width: 10px; }
+  .alarm-wrap::-webkit-scrollbar-track { background: var(--bg-app); }
+  .alarm-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; }
+  .badge-alarm { color: var(--status-alarm); border-color: var(--status-alarm); }
+  .badge-alarm.blink { animation: blip 1s steps(2, start) infinite; }
+  @keyframes blip { 50% { opacity: .35; } }
+  tr.hit td { background: rgba(46, 124, 246, .22); }
+  td.alarm-cell { color: var(--status-alarm); }
+
+  /* ---------- 手动下行 ---------- */
+  .send-panel { flex: 0 0 auto; }
+  .send-body { display: flex; align-items: center; gap: 8px; padding: 10px 14px; flex-wrap: wrap; }
+  .send-body select, .send-body input[type="text"] {
+    background: var(--bg-app); color: var(--text-primary); border: 1px solid var(--border);
+    border-radius: 6px; padding: 6px 10px; font-family: var(--mono); font-size: 12.5px;
+  }
+  .send-body input[type="text"] { flex: 1 1 260px; min-width: 140px; }
+  .send-body input[type="text"]:focus { outline: none; border-color: var(--accent); }
+  .send-body label { color: var(--text-secondary); font-size: 12px; display: inline-flex; align-items: center; gap: 4px; }
+  .send-log {
+    padding: 0 14px 10px; font-family: var(--mono); font-size: 11.5px;
+    color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .send-log .tx { color: var(--accent); }
 
   /* ---------- 字段表编辑器 ---------- */
   .dialog.wide { width: 960px; max-width: 96vw; }
@@ -221,6 +279,7 @@
     <div class="topbar-right">
       <div class="conn">
         <span id="tagMock" class="tag mock hidden">模拟数据源</span>
+        <span id="tagAlarm" class="tag badge-alarm hidden">报警</span>
         <span id="tagScan" class="tag hidden"></span>
         <span id="badge" class="badge offline">未连接</span>
         <span id="portName" class="port">--</span>
@@ -238,39 +297,84 @@
     <div class="stat"><label>高频 2 字节组合</label><b id="sPairs" class="dim small">--</b></div>
   </section>
 
-  <section class="panel">
-    <div class="panel-head">
-      <span class="caption">原始数据流（HEX / ASCII 原始字节）</span>
-      <div class="actions">
-        <button id="btnPause">暂停</button>
-        <button id="btnClear">清屏</button>
+  <div class="mid">
+    <section class="panel">
+      <div class="panel-head">
+        <span class="caption">原始数据流（HEX / ASCII 原始字节）</span>
+        <div class="actions">
+          <button id="btnPause">暂停</button>
+          <button id="btnClear">清屏</button>
+        </div>
       </div>
-    </div>
-    <div id="hexPane" class="hex"><div class="empty">等待数据……</div></div>
-  </section>
+      <div id="hexPane" class="hex"><div class="empty">等待数据……</div></div>
+    </section>
 
-  <section class="panel frames-panel">
-    <div class="panel-head">
-      <span class="caption">结构化采样帧 <span id="protoLayout" class="tag"></span></span>
-      <span id="protoStats" class="proto-stats"></span>
-    </div>
-    <div id="framesWrap" class="frames-wrap">
-      <table>
-        <thead><tr id="frameHead"></tr></thead>
-        <tbody id="frameBody"><tr><td class="empty">等待帧……</td></tr></tbody>
-      </table>
-    </div>
-  </section>
+    <section class="panel curve-panel">
+      <div class="panel-head">
+        <span class="caption">曲线 <span id="curveTag" class="tag">单 Y 轴</span></span>
+        <div class="actions">
+          <button id="btnCurvePause">暂停</button>
+          <button id="btnCurvePng">导出 PNG</button>
+          <button id="btnCurveCsv">导出 CSV</button>
+          <button id="btnAlarmCsv">报警 CSV</button>
+        </div>
+      </div>
+      <div class="curve-wrap">
+        <canvas id="curveCanvas"></canvas>
+        <div id="curveTip" class="curve-tip hidden"></div>
+      </div>
+      <div class="curve-tools">
+        <button id="btnCurveFit">自适应 Y</button>
+        <input id="curveSlider" type="range" min="0" max="1000" value="1000" class="hidden" />
+        <span id="curveWin" class="win"></span>
+      </div>
+      <div id="curveLegend" class="curve-legend"></div>
+    </section>
+  </div>
 
-  <section class="panel curve-panel">
+  <div class="lower">
+    <section class="panel frames-panel">
+      <div class="panel-head">
+        <span class="caption">结构化采样帧 <span id="protoLayout" class="tag"></span></span>
+        <span id="protoStats" class="proto-stats"></span>
+      </div>
+      <div id="framesWrap" class="frames-wrap">
+        <table>
+          <thead><tr id="frameHead"></tr></thead>
+          <tbody id="frameBody"><tr><td class="empty">等待帧……</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel alarm-panel">
+      <div class="panel-head">
+        <span class="caption">报警 <span id="alarmStats" class="proto-stats"></span></span>
+        <div class="actions">
+          <button id="btnAlarmMute">静音</button>
+          <button id="btnAlarmClearList">清空</button>
+        </div>
+      </div>
+      <div id="alarmWrap" class="alarm-wrap"><div class="alarm-empty">暂无报警</div></div>
+    </section>
+  </div>
+
+  <section class="panel send-panel">
     <div class="panel-head">
-      <span class="caption">曲线 <span id="curveTag" class="tag">第一批预留</span></span>
-      <span id="curveStats" class="proto-stats"></span>
+      <span class="caption">手动下行 <span id="sendState" class="tag">未锁定</span>
+        <span class="proto-stats">（仅锁定后开放，扫描期只读不写）</span></span>
     </div>
-    <div id="curveWrap" class="curve-wrap">
-      曲线绘制将在第二批实现：多通道叠加、单 Y 轴、回放联动、导出 PNG。<br />
-      本批已完成"采样值换算 + 会话缓冲"，字段表与颜色配置即曲线数据源。
+    <div class="send-body">
+      <select id="selSendMode">
+        <option value="text">文本</option>
+        <option value="hex">HEX</option>
+      </select>
+      <input id="inpSendData" type="text" autocomplete="off"
+             placeholder="文本内容，或 HEX 字节（如 AA 55 01）" />
+      <label id="chkNewlineWrap"><input id="chkSendNewline" type="checkbox" checked /> 追加换行</label>
+      <button id="btnSend" class="primary" disabled>发送</button>
+      <span id="sendHint" class="hint grow"></span>
     </div>
+    <div id="sendLog" class="send-log">下行记录：—</div>
   </section>
 
   <footer id="evtLog" class="events"></footer>
@@ -495,6 +599,7 @@
 
   function tick() {
     if (dirty && !paused) { dirty = false; render(); }
+    if (curveDirty) { curveDirty = false; drawCurve(); }
     requestAnimationFrame(tick);
   }
 
@@ -516,6 +621,8 @@
 
   function updateStatus(s) {
     if (s.mock) tagMock.classList.remove("hidden");
+    lockState = s.state;
+    updateSendState();
 
     if (s.state === "locked") {
       badge.className = "badge locked";
@@ -621,21 +728,37 @@
     if (!items || !items.length) return;
     if (!frameCount) frameBody.innerHTML = "";
 
+    // 表格列序 = 接收时刻 + 进表字段（与 analyzer.columns() 同序）
+    var tableFields = curve.fields.filter(function (f) { return f.visible && f.visible.table; });
     var nearBottom = framesWrap.scrollHeight - framesWrap.scrollTop - framesWrap.clientHeight < 40;
     var frag = document.createDocumentFragment();
     items.forEach(function (f) {
       var tr = document.createElement("tr");
-      (f.cells || []).forEach(function (v) {
+      if (f.ts != null) tr.dataset.ts = f.ts;
+      var flds = f.fields || null;                  // 首屏 /api/protocol 的 recent 无分析结果
+      (f.cells || []).forEach(function (v, ci) {
         var td = document.createElement("td");
         td.textContent = v;
+        var spec = ci > 0 ? tableFields[ci - 1] : null;
+        if (spec && hasAlarm(spec)) td.classList.add("alarm-cell");
+        if (spec && flds && flds[spec.id] && flds[spec.id].alarm) td.classList.add("cell-alarm");
         tr.appendChild(td);
       });
       frag.appendChild(tr);
       frameCount++;
+      if (flds && f.ts != null) {                    // 喂曲线：只取滤波后的工程量
+        var rec = { ts: f.ts, v: {} };
+        for (var fid in flds) {
+          var val = flds[fid].value;
+          if (typeof val === "number" && isFinite(val)) rec.v[fid] = val;
+        }
+        pushSample(rec);
+      }
     });
     frameBody.appendChild(frag);
     while (frameBody.childElementCount > MAX_FRAMES) frameBody.removeChild(frameBody.firstChild);
     if (nearBottom) framesWrap.scrollTop = framesWrap.scrollHeight;
+    if (frag.childElementCount) curveDirty = true;
   }
 
   function loadProtocol() {
@@ -765,6 +888,8 @@
         if (!body.ok) { setSchemeHint(body.error || "读取方案失败", "error"); return; }
         activeScheme = body.scheme;
         setSchemeHint("当前： " + schemeSummary(activeScheme), "");
+        setCurveConfig(activeScheme);       // 曲线窗口/抽稀策略随方案走
+        loadFields();                        // 字段表变了：图例、进曲线可见性、报警标色都跟着换
       })
       .catch(function () {});
   }
@@ -778,6 +903,12 @@
         if (!body.ok) { setSchemeHint(body.error || "切换失败", "error"); return; }
         activeScheme = body.scheme;
         setSchemeHint("已启用： " + schemeSummary(activeScheme), "ok");
+        curve.buf = []; curve.cursor = null;      // 旧口径的采样点对新字段无意义
+        alarmLog = []; alarmActive = {};
+        renderAlarmList(); updateAlarmBanner();
+        setCurveConfig(activeScheme);
+        loadFields();
+        curveDirty = true;
       })
       .catch(function () { setSchemeHint("切换失败：本地服务不可用", "error"); });
   });
@@ -947,6 +1078,576 @@
       .then(function () { loadSchemes(); });
   }
 
+  /* ================= 第二批：曲线 / 报警 / 手动下行 ================= */
+  var curveCanvas = document.getElementById("curveCanvas");
+  var curveTip = document.getElementById("curveTip");
+  var curveLegend = document.getElementById("curveLegend");
+  var curveSlider = document.getElementById("curveSlider");
+  var curveWinEl = document.getElementById("curveWin");
+  var curveTag = document.getElementById("curveTag");
+  var btnCurvePause = document.getElementById("btnCurvePause");
+  var btnCurveFit = document.getElementById("btnCurveFit");
+  var btnCurvePng = document.getElementById("btnCurvePng");
+  var btnCurveCsv = document.getElementById("btnCurveCsv");
+  var btnAlarmCsv = document.getElementById("btnAlarmCsv");
+  var alarmWrap = document.getElementById("alarmWrap");
+  var alarmStats = document.getElementById("alarmStats");
+  var tagAlarm = document.getElementById("tagAlarm");
+  var btnAlarmMute = document.getElementById("btnAlarmMute");
+  var btnAlarmClearList = document.getElementById("btnAlarmClearList");
+  var btnSend = document.getElementById("btnSend");
+  var selSendMode = document.getElementById("selSendMode");
+  var inpSendData = document.getElementById("inpSendData");
+  var chkSendNewline = document.getElementById("chkSendNewline");
+  var chkNewlineWrap = document.getElementById("chkNewlineWrap");
+  var sendHint = document.getElementById("sendHint");
+  var sendState = document.getElementById("sendState");
+  var sendLog = document.getElementById("sendLog");
+
+  var curveDirty = true;
+  var curve = {
+    buf: [],            // [{ts, v:{字段id:值}}]，按时间升序
+    fields: [],         // 当前方案字段（含颜色 / 可见性 / 小数位）
+    maxPoints: 20000,
+    windowS: 60,
+    decimate: "minmax",
+    paused: false,
+    fit: true,
+    frozen: null,
+    yMin: 0, yMax: 1,
+    cursor: null,
+    geo: null           // 最近一次绘制的几何信息（悬停/点击换算用）
+  };
+
+  /* ---------------- 工具 ---------------- */
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+  function timeStr(ts) {
+    var d = new Date(ts * 1000);
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds())
+      + "." + String(Math.floor(d.getMilliseconds() / 10) + 100).slice(1);
+  }
+
+  function stamp() {
+    var d = new Date();
+    return d.getFullYear() + pad2(d.getMonth() + 1) + pad2(d.getDate()) + "_"
+      + pad2(d.getHours()) + pad2(d.getMinutes()) + pad2(d.getSeconds());
+  }
+
+  function fmtVal(v, dec) {
+    if (typeof v !== "number" || !isFinite(v)) return "—";
+    return v.toFixed(Math.max(0, Math.min(6, dec | 0)));
+  }
+
+  function downloadBlob(blob, name) {
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1500);
+  }
+
+  function fetchCsv(url, name) {
+    fetch(url).then(function (r) { return r.blob(); })
+      .then(function (b) { downloadBlob(b, name); pushEvent("已导出 " + name); })
+      .catch(function () { pushEvent("导出失败：本地服务不可用"); });
+  }
+
+  function pushSample(rec) {
+    curve.buf.push(rec);
+    if (curve.buf.length > curve.maxPoints) {
+      curve.buf.splice(0, curve.buf.length - curve.maxPoints);   // 超限丢最旧
+    }
+  }
+
+  function nearestIndex(ts) {
+    var b = curve.buf, lo = 0, hi = b.length - 1;
+    if (!b.length) return -1;
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1;
+      if (b[mid].ts < ts) lo = mid + 1; else hi = mid;
+    }
+    if (lo > 0 && Math.abs(b[lo - 1].ts - ts) < Math.abs(b[lo].ts - ts)) return lo - 1;
+    return lo;
+  }
+
+  function visibleFields() {
+    return curve.fields.filter(function (f) { return f.visible && f.visible.curve; });
+  }
+
+  function hasAlarm(spec) {
+    var a = (spec && spec.alarm) || {};
+    return !!((a.high && a.high.enabled) || (a.low && a.low.enabled));
+  }
+
+  function setCurveConfig(scheme) {
+    var c = (scheme && scheme.curve) || {};
+    curve.windowS = c.window_s || 60;
+    curve.maxPoints = c.max_points || 20000;
+    curve.decimate = c.decimate || "minmax";
+    curveTag.textContent = "窗 " + curve.windowS + "s · "
+      + (curve.decimate === "minmax" ? "minmax 抽稀" : "不抽稀");
+  }
+
+  function loadFields() {
+    return fetch("/api/fields").then(function (r) { return r.json(); })
+      .then(function (b) {
+        curve.fields = b.fields || [];
+        renderLegend();
+        curveDirty = true;
+      })
+      .catch(function () {});
+  }
+
+  function renderLegend() {
+    var vis = visibleFields();
+    if (!vis.length) {
+      curveLegend.innerHTML = '<span>无可绘制字段（在字段表里勾选“进曲线”）</span>';
+      return;
+    }
+    var html = "";
+    vis.forEach(function (f) {
+      html += '<span><i style="background:' + esc(f.color || "#2E7CF6") + '"></i>'
+        + esc(f.name || f.id) + (f.unit ? " (" + esc(f.unit) + ")" : "") + "</span>";
+    });
+    curveLegend.innerHTML = html;
+  }
+
+  /* ---------------- 视图窗口（实时 / 暂停回看） ---------------- */
+  function bufBounds() {
+    var b = curve.buf;
+    return b.length ? [b[0].ts, b[b.length - 1].ts] : null;
+  }
+
+  function currentView() {
+    var bnd = bufBounds();
+    if (!bnd) return null;
+    if (!curve.paused) return [bnd[1] - curve.windowS, bnd[1]];
+    var span = bnd[1] - bnd[0];
+    var win = Math.min(curve.windowS, Math.max(span, 1));
+    var endMin = bnd[0] + win, endMax = bnd[1];
+    if (endMax <= endMin) return [bnd[0], bnd[1]];
+    var frac = (parseFloat(curveSlider.value) || 0) / 1000;
+    var t1 = endMin + frac * (endMax - endMin);
+    return [t1 - win, t1];
+  }
+
+  function updateWinLabel() {
+    var v = currentView();
+    curveWinEl.textContent = v
+      ? (curve.paused ? "回看 " : "实时 ") + timeStr(v[0]) + " → " + timeStr(v[1])
+      : "等待数据";
+  }
+
+  /* ---------------- 绘制 ---------------- */
+  function fitCanvas() {
+    var dpr = window.devicePixelRatio || 1;
+    var w = curveCanvas.clientWidth, h = curveCanvas.clientHeight;
+    if (w <= 0 || h <= 0) return false;
+    var W = Math.round(w * dpr), H = Math.round(h * dpr);
+    if (curveCanvas.width !== W) curveCanvas.width = W;
+    if (curveCanvas.height !== H) curveCanvas.height = H;
+    return true;
+  }
+
+  function drawCurve() {
+    updateWinLabel();
+    if (!fitCanvas()) return;
+    var ctx = curveCanvas.getContext("2d");
+    var dpr = window.devicePixelRatio || 1;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, curveCanvas.width, curveCanvas.height);
+    ctx.scale(dpr, dpr);
+    var w = curveCanvas.clientWidth, h = curveCanvas.clientHeight;
+
+    var padL = 50, padR = 10, padT = 10, padB = 22;
+    var pw = w - padL - padR, ph = h - padT - padB;
+    if (pw < 20 || ph < 20) return;
+
+    ctx.font = "11px Consolas, 'Cascadia Mono', monospace";
+    ctx.textBaseline = "middle";
+
+    var view = currentView();
+    var vis = visibleFields();
+    if (!view || !vis.length) {
+      curve.geo = null;
+      ctx.fillStyle = "#8A94A8";
+      ctx.textAlign = "center";
+      ctx.fillText("等待采样数据…（字段表里勾选“进曲线”）", padL + pw / 2, padT + ph / 2);
+      return;
+    }
+
+    var t0 = view[0], t1 = view[1];
+    if (t1 <= t0) t1 = t0 + 1;
+
+    // 收集窗口内的点 + Y 范围
+    var series = {}, yMin = Infinity, yMax = -Infinity;
+    vis.forEach(function (f) {
+      var pts = [];
+      for (var i = 0; i < curve.buf.length; i++) {
+        var r = curve.buf[i];
+        if (r.ts < t0 || r.ts > t1) continue;
+        var v = r.v[f.id];
+        if (typeof v === "number" && isFinite(v)) {
+          pts.push([r.ts, v]);
+          if (v < yMin) yMin = v;
+          if (v > yMax) yMax = v;
+        }
+      }
+      series[f.id] = pts;
+    });
+    if (!isFinite(yMin)) { yMin = 0; yMax = 1; }
+    if (curve.fit) {
+      if (yMax === yMin) { yMin -= 1; yMax += 1; }
+      var margin = (yMax - yMin) * 0.06;
+      yMin -= margin; yMax += margin;
+      curve.yMin = yMin; curve.yMax = yMax;
+    } else if (curve.frozen) {
+      yMin = curve.frozen[0]; yMax = curve.frozen[1];
+    }
+    curve.yMin = yMin; curve.yMax = yMax;
+
+    function px(t) { return padL + (t - t0) / (t1 - t0) * pw; }
+    function py(v) { return padT + (1 - (v - yMin) / (yMax - yMin)) * ph; }
+    curve.geo = { padL: padL, padT: padT, pw: pw, ph: ph, t0: t0, t1: t1 };
+
+    // 横向网格 + Y 轴刻度
+    ctx.textAlign = "right";
+    for (var k = 0; k <= 4; k++) {
+      var vv = yMin + (yMax - yMin) * k / 4;
+      var yy = py(vv);
+      ctx.strokeStyle = "#2C3549";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(padL, yy); ctx.lineTo(padL + pw, yy); ctx.stroke();
+      ctx.fillStyle = "#8A94A8";
+      ctx.fillText(vv.toFixed(Math.abs(yMax - yMin) < 10 ? 2 : 0), padL - 6, yy);
+    }
+    // 纵向网格 + 时间刻度
+    ctx.textAlign = "center";
+    for (var j = 0; j <= 5; j++) {
+      var tt = t0 + (t1 - t0) * j / 5;
+      var xx = px(tt);
+      ctx.strokeStyle = "rgba(44,53,73,.55)";
+      ctx.beginPath(); ctx.moveTo(xx, padT); ctx.lineTo(xx, padT + ph); ctx.stroke();
+      ctx.fillStyle = "#8A94A8";
+      ctx.fillText(timeStr(tt).slice(0, 8), xx, padT + ph + 11);
+    }
+
+    // 各通道（单 Y 轴叠加）
+    var maxCols = Math.max(20, Math.floor(pw));
+    vis.forEach(function (f) {
+      var pts = series[f.id];
+      if (!pts || !pts.length) return;
+      ctx.strokeStyle = f.color || "#2E7CF6";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      if (curve.decimate === "minmax" && pts.length > maxCols * 2) {
+        var cols = {};
+        for (var i = 0; i < pts.length; i++) {
+          var x = Math.round(px(pts[i][0]) - padL);
+          var v = pts[i][1], c = cols[x];
+          if (!c) cols[x] = [v, v]; else { if (v < c[0]) c[0] = v; if (v > c[1]) c[1] = v; }
+        }
+        var xs = Object.keys(cols).map(Number).sort(function (a, b) { return a - b; });
+        var first = true;
+        xs.forEach(function (col) {
+          var c = cols[col], X = padL + col;
+          if (first) { ctx.moveTo(X, py(c[0])); first = false; }
+          else { ctx.lineTo(X, py(c[0])); }
+          ctx.lineTo(X, py(c[1]));
+        });
+      } else {
+        for (var n = 0; n < pts.length; n++) {
+          var X = px(pts[n][0]), Y = py(pts[n][1]);
+          if (n === 0) ctx.moveTo(X, Y); else ctx.lineTo(X, Y);
+        }
+      }
+      ctx.stroke();
+    });
+
+    // 悬停十字线 + 各通道取值点
+    if (curve.cursor && curve.cursor.ts >= t0 && curve.cursor.ts <= t1) {
+      var idx = nearestIndex(curve.cursor.ts);
+      var cx = px(curve.cursor.ts);
+      ctx.strokeStyle = "rgba(232,236,244,.5)";
+      ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(cx, padT); ctx.lineTo(cx, padT + ph); ctx.stroke();
+      if (idx >= 0) {
+        var rec = curve.buf[idx];
+        vis.forEach(function (f) {
+          var v = rec.v[f.id];
+          if (typeof v === "number" && isFinite(v)) {
+            ctx.fillStyle = f.color || "#2E7CF6";
+            ctx.beginPath(); ctx.arc(cx, py(v), 2.8, 0, 6.2832); ctx.fill();
+          }
+        });
+      }
+    }
+  }
+
+  function updateTip(ts) {
+    var idx = nearestIndex(ts);
+    if (idx < 0) return;
+    var rec = curve.buf[idx];
+    var vis = visibleFields();
+    var html = '<div><span class="k">' + timeStr(rec.ts) + "</span></div>";
+    vis.forEach(function (f) {
+      var v = rec.v[f.id];
+      html += '<div><i style="display:inline-block;width:8px;height:8px;border-radius:2px;'
+        + "margin-right:5px;background:" + esc(f.color || "#2E7CF6") + '"></i>'
+        + esc(f.name || f.id) + " <span class=\"k\">"
+        + fmtVal(v, f.decimals || 0) + (f.unit ? " " + esc(f.unit) : "") + "</span></div>";
+    });
+    curveTip.innerHTML = html;
+    curveTip.classList.remove("hidden");
+    var g = curve.geo, x = g ? g.padL + (ts - g.t0) / (g.t1 - g.t0) * g.pw : 0;
+    var left = x + 14;
+    if (left + curveTip.offsetWidth > curveCanvas.clientWidth) left = x - curveTip.offsetWidth - 14;
+    curveTip.style.left = Math.max(2, left) + "px";
+    curveTip.style.top = "10px";
+  }
+
+  function locateTableRow(ts) {
+    var rows = frameBody.querySelectorAll("tr");
+    var best = null, bestDiff = Infinity;
+    Array.prototype.forEach.call(rows, function (tr) {
+      var t = parseFloat(tr.dataset.ts);
+      if (isNaN(t)) return;
+      var d = Math.abs(t - ts);
+      if (d < bestDiff) { bestDiff = d; best = tr; }
+    });
+    Array.prototype.forEach.call(rows, function (tr) { tr.classList.remove("hit"); });
+    if (!best) {
+      pushEvent("该时刻不在表格缓冲内（表格仅保留最近 " + MAX_FRAMES + " 帧）");
+      return;
+    }
+    best.classList.add("hit");
+    if (best.scrollIntoView) best.scrollIntoView({ block: "center" });
+    pushEvent("已定位到表格行：" + timeStr(parseFloat(best.dataset.ts)));
+  }
+
+  /* ---------------- 曲线交互 ---------------- */
+  curveCanvas.addEventListener("mousemove", function (e) {
+    var g = curve.geo;
+    if (!g) return;
+    var rect = curveCanvas.getBoundingClientRect();
+    var x = e.clientX - rect.left;
+    if (x < g.padL || x > g.padL + g.pw) {
+      curve.cursor = null; curveTip.classList.add("hidden"); curveDirty = true; return;
+    }
+    var ts = g.t0 + (x - g.padL) / g.pw * (g.t1 - g.t0);
+    curve.cursor = { ts: ts };
+    updateTip(ts);
+    curveDirty = true;
+  });
+
+  curveCanvas.addEventListener("mouseleave", function () {
+    curve.cursor = null; curveTip.classList.add("hidden"); curveDirty = true;
+  });
+
+  curveCanvas.addEventListener("click", function (e) {
+    var g = curve.geo;
+    if (!g) return;
+    var rect = curveCanvas.getBoundingClientRect();
+    var x = e.clientX - rect.left;
+    if (x < g.padL || x > g.padL + g.pw) return;
+    locateTableRow(g.t0 + (x - g.padL) / g.pw * (g.t1 - g.t0));
+  });
+
+  btnCurveFit.addEventListener("click", function () {
+    curve.fit = !curve.fit;
+    btnCurveFit.classList.toggle("active", !curve.fit);
+    btnCurveFit.textContent = curve.fit ? "自适应 Y" : "锁定 Y";
+    if (!curve.fit) curve.frozen = [curve.yMin, curve.yMax];
+    curveDirty = true;
+  });
+
+  btnCurvePause.addEventListener("click", function () {
+    curve.paused = !curve.paused;
+    btnCurvePause.textContent = curve.paused ? "继续" : "暂停";
+    btnCurvePause.classList.toggle("active", curve.paused);
+    curveSlider.classList.toggle("hidden", !curve.paused);
+    if (curve.paused) { curveSlider.value = 1000; loadHistory(); }
+    curveDirty = true;
+  });
+
+  curveSlider.addEventListener("input", function () { curveDirty = true; });
+
+  btnCurvePng.addEventListener("click", function () {
+    drawCurve();
+    curveCanvas.toBlob(function (blob) {
+      if (!blob) { pushEvent("导出 PNG 失败"); return; }
+      downloadBlob(blob, "curve_" + stamp() + ".png");
+      pushEvent("已导出曲线 PNG");
+    }, "image/png");
+  });
+
+  btnCurveCsv.addEventListener("click", function () {
+    fetchCsv("/api/export/samples.csv", "samples_" + stamp() + ".csv");
+  });
+  btnAlarmCsv.addEventListener("click", function () {
+    fetchCsv("/api/export/alarms.csv", "alarms_" + stamp() + ".csv");
+  });
+
+  function loadHistory() {
+    return fetch("/api/store?limit=200000").then(function (r) { return r.json(); })
+      .then(function (b) {
+        var items = b.items || [];
+        if (!items.length) return;
+        var byTs = {};
+        items.forEach(function (it) { (byTs[it.ts] = byTs[it.ts] || {})[it.field] = it.value; });
+        var have = {};
+        curve.buf.forEach(function (rec) { have[rec.ts] = true; });
+        var added = 0;
+        Object.keys(byTs).forEach(function (k) {
+          var ts = parseFloat(k);
+          if (have[ts]) return;
+          curve.buf.push({ ts: ts, v: byTs[k] });
+          added++;
+        });
+        curve.buf.sort(function (a, b) { return a.ts - b.ts; });
+        if (curve.buf.length > curve.maxPoints) {
+          curve.buf.splice(0, curve.buf.length - curve.maxPoints);
+        }
+        if (added) pushEvent("已从会话库回填 " + added + " 条历史采样");
+        curveDirty = true;
+      })
+      .catch(function () {});
+  }
+
+  window.addEventListener("resize", function () { curveDirty = true; });
+
+  /* ---------------- 报警 ---------------- */
+  var alarmLog = [];        // 升序
+  var alarmActive = {};     // 当前处于报警的字段
+  var alarmMuted = false;
+
+  function addAlarmItems(items) {
+    (items || []).forEach(function (a) {
+      if (a.active) alarmActive[a.field] = true; else delete alarmActive[a.field];
+      alarmLog.push(a);
+    });
+    if (alarmLog.length > 300) alarmLog.splice(0, alarmLog.length - 300);
+    renderAlarmList();
+    updateAlarmBanner();
+  }
+
+  function renderAlarmList() {
+    if (!alarmLog.length) {
+      alarmWrap.innerHTML = '<div class="alarm-empty">暂无报警</div>';
+      return;
+    }
+    var frag = document.createDocumentFragment();
+    var start = Math.max(0, alarmLog.length - 200);
+    for (var i = alarmLog.length - 1; i >= start; i--) {
+      var a = alarmLog[i];
+      var div = document.createElement("div");
+      div.className = "alarm-item " + (a.active ? "active" : "clear");
+      var t = document.createElement("span"); t.className = "t";
+      t.textContent = a.ts_text || timeStr(a.ts);
+      var m = document.createElement("span"); m.className = "msg";
+      m.textContent = a.text || "";
+      div.appendChild(t); div.appendChild(m);
+      frag.appendChild(div);
+    }
+    alarmWrap.innerHTML = "";
+    alarmWrap.appendChild(frag);
+  }
+
+  function updateAlarmBanner() {
+    var n = Object.keys(alarmActive).length;
+    if (n > 0) {
+      tagAlarm.classList.remove("hidden");
+      tagAlarm.textContent = "报警 ×" + n;
+      tagAlarm.classList.toggle("blink", !alarmMuted);
+    } else {
+      tagAlarm.classList.add("hidden");
+      tagAlarm.classList.remove("blink");
+    }
+    alarmStats.textContent = n > 0 ? ("当前 " + n + " 项") : "";
+  }
+
+  btnAlarmMute.addEventListener("click", function () {
+    alarmMuted = !alarmMuted;
+    btnAlarmMute.textContent = alarmMuted ? "取消静音" : "静音";
+    btnAlarmMute.classList.toggle("active", alarmMuted);
+    updateAlarmBanner();
+    pushEvent(alarmMuted ? "报警提示已静音（记录仍保留）" : "报警提示已恢复");
+  });
+
+  btnAlarmClearList.addEventListener("click", function () {
+    alarmLog = []; alarmActive = {};
+    renderAlarmList(); updateAlarmBanner();
+    pushEvent("报警列表已清空（会话库记录仍在，可导出）");
+  });
+
+  function loadAlarms() {
+    return fetch("/api/alarms?limit=200").then(function (r) { return r.json(); })
+      .then(function (b) {
+        var items = b.items || [];
+        alarmActive = {};
+        var seen = {};
+        items.forEach(function (a) {                      // 倒序：每字段看最新一条
+          if (seen[a.field]) return;
+          seen[a.field] = true;
+          if (a.active) alarmActive[a.field] = true;
+        });
+        alarmLog = items.slice().reverse();               // 转成升序，便于后续追加
+        renderAlarmList(); updateAlarmBanner();
+      })
+      .catch(function () {});
+  }
+
+  /* ---------------- 手动下行 ---------------- */
+  var lockState = "searching";
+
+  function updateSendState() {
+    var locked = (lockState === "locked");
+    btnSend.disabled = !locked;
+    sendState.textContent = locked ? "已锁定" : "未锁定";
+    sendState.className = "tag" + (locked ? " mock" : "");
+  }
+
+  function setSendHint(text, kind) {
+    sendHint.textContent = text;
+    sendHint.className = "hint grow" + (kind ? " " + kind : "");
+  }
+
+  function logSend(m) {
+    sendLog.innerHTML = '<span class="tx">下行 ' + m.n + " 字节 → " + esc(m.port || "-")
+      + "</span>  " + esc(m.hex || "");
+    pushEvent("已下行 " + m.n + " 字节：" + (m.hex || ""));
+  }
+
+  selSendMode.addEventListener("change", function () {
+    var isHex = selSendMode.value === "hex";
+    chkNewlineWrap.style.display = isHex ? "none" : "";
+    inpSendData.placeholder = isHex ? "HEX 字节（如 AA 55 01）" : "文本内容";
+  });
+
+  inpSendData.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && !btnSend.disabled) btnSend.click();
+  });
+
+  btnSend.addEventListener("click", function () {
+    var data = inpSendData.value;
+    if (!data) { setSendHint("请输入要发送的内容", "error"); return; }
+    setSendHint("发送中…", "");
+    fetch("/api/send", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: selSendMode.value, data: data,
+        append_newline: chkSendNewline.checked
+      })
+    }).then(function (r) { return r.json().then(function (b) { return { status: r.status, body: b }; }); })
+      .then(function (res) {
+        if (!res.body.ok) { setSendHint(res.body.error || "发送失败", "error"); return; }
+        setSendHint("已发送 " + res.body.bytes + " 字节", "ok");
+        inpSendData.value = "";
+      })
+      .catch(function () { setSendHint("发送失败：本地服务不可用", "error"); });
+  });
+
   /* ---------------- 连接 ---------------- */
   function connect() {
     var ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://")
@@ -961,6 +1662,8 @@
       else if (m.type === "status") updateStatus(m);
       else if (m.type === "frames") { appendFrames(m.items); updateProtoStats(m.stats); }
       else if (m.type === "layout") { updateProtoStats(m.stats); pushEvent(m.text); }
+      else if (m.type === "alarm") addAlarmItems(m.items);
+      else if (m.type === "send") logSend(m);
       else if (m.type === "event") pushEvent(m.text);
     };
 
@@ -976,6 +1679,10 @@
     .then(updateStatus).catch(function () {});
   loadSettings();
   loadProtocol();
+  loadAlarms();
+  loadFields();
+  updateSendState();
+  updateWinLabel();
   connect();
   requestAnimationFrame(tick);
 })();

@@ -19,24 +19,28 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import csv
+import datetime
+import io
 import pathlib
 import sys
 import time
+from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from service import schema as scheme_store
-from service.analysis import Analyzer
+from service.analysis import COL_TS, Analyzer, format_number
 from service.layout_config import (MODE_TEXT, PROTO_CHOICES, cfg_from_scheme,
                                    describe, layout_from_config,
                                    layout_from_scheme, resolve_layout_choice,
                                    save_config)
-from service.protocol import Decoder
+from service.protocol import Decoder, _ts_text
 from service.protocol_text import TextLineDecoder
 from service.serial_io import SerialHub
 from service.settings import (APP_VERSION, DEFAULT_APP_NAME, MAX_APP_NAME,
@@ -103,6 +107,26 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
         stats["scheme"] = state["scheme"].name
         return stats
 
+    def _field_meta() -> dict[str, dict]:
+        """字段 id → {name, unit, decimals}（导出表头、报警列表补名用）。"""
+        out: dict[str, dict] = {}
+        for f in state["analyzer"].fields:
+            out[f.id] = {
+                "name": str(getattr(f, "name", "") or f.id),
+                "unit": str(getattr(f, "unit", "") or ""),
+                "decimals": int(getattr(f, "decimals", 0) or 0),
+            }
+        return out
+
+    def _csv_response(text: str, prefix: str) -> Response:
+        """带 BOM 的 UTF-8 CSV 附件响应（BOM 让 Excel 正确识别中文）。"""
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        return Response(
+            content=("\ufeff" + text).encode("utf-8"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{prefix}_{stamp}.csv"'},
+        )
+
     def _layout_view() -> dict:
         """界面用的帧格式快照；命令行覆盖时不误导界面显示已存的配置。"""
         current = state["decoder"].layout
@@ -125,6 +149,7 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
         analyzer = state["analyzer"]
         sample_store = state["store"]
         items: list[dict] = []
+        alarms: list[dict] = []
         for frame in frames:
             payload = frame.to_payload()
             ts = payload.get("ts") or time.time()
@@ -136,8 +161,17 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
             if sample_store is not None:
                 sample_store.append(ts, [(fid, meta["value"])
                                          for fid, meta in result["fields"].items()])
+                # 报警状态跳变：入库（长期留存靠导出）+ 稍后推送界面
+                for ev in result.get("alarms", []):
+                    # kind 编码进入/解除：side 表示阈值侧，"<side>_clear" 表示解除
+                    kind = ev["side"] if ev["active"] else f"{ev['side']}_clear"
+                    sample_store.append_alarm(ts, ev["field"], kind, ev["value"],
+                                              ev["limit"], ev["text"])
+                    alarms.append({**ev, "ts": ts})
 
         ws_hub.broadcast({"type": "frames", "items": items, "stats": _stats_view()})
+        if alarms:
+            ws_hub.broadcast({"type": "alarm", "items": alarms})
 
     def _apply_scheme(scheme_obj, note: str) -> dict:
         """把方案切为当前生效方案：重建解析器与分析器，并通知界面（串口线程安全）。"""
@@ -198,6 +232,113 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
             "stats": state["store"].stats(),
             "items": state["store"].query_range(t0, t1, ids, limit=limit),
         })
+
+    # -------------------------------------------------- 报警 / 导出 / 下行
+    @app.get("/api/alarms")
+    async def api_alarms(limit: int = 500):
+        """当前会话的报警记录（含进入与解除），供界面报警列表与导出。"""
+        rows = state["store"].query_alarms(limit=limit)
+        meta = _field_meta()
+        for r in rows:
+            info = meta.get(r["field"], {})
+            r["name"] = info.get("name", r["field"])
+            r["unit"] = info.get("unit", "")
+            r["decimals"] = info.get("decimals", 0)
+            r["ts_text"] = _ts_text(r["ts"])
+            kind = str(r.get("kind") or "")
+            r["active"] = not kind.endswith("_clear")     # 进入=True / 解除=False
+            r["side"] = kind[:-len("_clear")] if kind.endswith("_clear") else kind
+        return JSONResponse({"items": rows, "stats": state["store"].stats()})
+
+    @app.get("/api/export/samples.csv")
+    async def api_export_samples(t0: float | None = None, t1: float | None = None,
+                                 fields: str | None = None):
+        """采样数据导出的 CSV（长表→宽表：一行一个时刻，一列一个字段）。"""
+        ids = [x for x in str(fields or "").split(",") if x] or None
+        rows = state["store"].query_range(t0, t1, ids, limit=200000)
+        meta = _field_meta()
+        order = [f.id for f in state["analyzer"].fields
+                 if (not ids or f.id in ids)]
+        known = set(order)
+        for r in rows:                                  # 兜底：库里出现字段表外的字段也补列
+            if r["field"] not in known:
+                known.add(r["field"])
+                order.append(r["field"])
+
+        def label(fid: str) -> str:
+            info = meta.get(fid)
+            if not info:
+                return fid
+            return f"{info['name']}({info['unit']})" if info["unit"] else info["name"]
+
+        by_ts: dict[float, dict[str, Any]] = {}
+        for r in rows:
+            by_ts.setdefault(r["ts"], {})[r["field"]] = r["value"]
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([COL_TS] + [label(fid) for fid in order])
+        for ts in sorted(by_ts):
+            values = by_ts[ts]
+            line = [_ts_text(ts)]
+            for fid in order:
+                v = values.get(fid)
+                line.append("" if v is None
+                            else format_number(v, meta.get(fid, {}).get("decimals", 0)))
+            writer.writerow(line)
+        return _csv_response(buf.getvalue(), "samples")
+
+    @app.get("/api/export/alarms.csv")
+    async def api_export_alarms():
+        """报警记录导出的 CSV（按时间升序）。"""
+        rows = state["store"].query_alarms(limit=100000)
+        meta = _field_meta()
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["时间", "字段ID", "字段名", "类型", "状态", "数值", "限值", "说明"])
+        for r in reversed(rows):                        # query_alarms 是倒序，导出改升序
+            info = meta.get(r["field"], {})
+            kind = str(r.get("kind") or "")
+            clear = kind.endswith("_clear")
+            side = kind[:-len("_clear")] if clear else kind
+            writer.writerow([
+                _ts_text(r["ts"]), r["field"],
+                info.get("name", r["field"]),
+                "上限" if side == "high" else ("下限" if side == "low" else side),
+                "解除" if clear else "进入",
+                "" if r["value"] is None else format_number(r["value"], info.get("decimals", 0)),
+                "" if r["limit"] is None else format_number(r["limit"], info.get("decimals", 0)),
+                r["text"] or "",
+            ])
+        return _csv_response(buf.getvalue(), "alarms")
+
+    @app.post("/api/send")
+    async def api_send(payload: dict):
+        """手动下行：仅在接收端已锁定时允许（扫描期只读，禁止写串口）。"""
+        body = payload if isinstance(payload, dict) else {}
+        mode = str(body.get("mode", "text")).strip().lower()
+        raw_text = str(body.get("data", ""))
+        if mode == "hex":
+            compact = "".join(raw_text.split())
+            try:
+                data = bytes.fromhex(compact)
+            except ValueError:
+                return JSONResponse({"ok": False, "error": "HEX 格式非法（只允许 0–9 A–F）"},
+                                    status_code=400)
+        else:
+            data = raw_text.encode("utf-8", "replace")
+            if body.get("append_newline", True):
+                data += b"\n"
+        if not data:
+            return JSONResponse({"ok": False, "error": "发送内容为空"}, status_code=400)
+        if len(data) > 512:
+            return JSONResponse({"ok": False, "error": "单次下行最多 512 字节"},
+                                status_code=400)
+        ok, message = hub.send(data)
+        if not ok:
+            return JSONResponse({"ok": False, "error": message}, status_code=409)
+        return JSONResponse({"ok": True, "bytes": len(data), "mode": mode,
+                             "hex": data.hex().upper(), "message": message})
 
     # -------------------------------------------------- 方案 CRUD
     @app.get("/api/schemes")

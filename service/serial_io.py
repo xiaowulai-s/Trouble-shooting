@@ -10,7 +10,8 @@
        因此即使同机插着别的设备调试串口（如 COM3），也不会被我们干扰。
     2. 打开串口时 pyserial 会按默认电平置位 DTR/RTS，这是驱动层行为、
        无法完全避免；除此之外不主动操作任何控制线。
-    3. v0.1 不提供任何下行发送接口，协议解析留到下一步。
+    3. 下行（手动发送）只在"已锁定"状态开放：send() 未锁定一律拒绝写入，
+       保证扫描/识别期的"只读"铁律不被打破。
 
 识别判据（无真实设备时的退化判据）：
     对候选口以 115200/8/N/1 打开并静默监听，按 1 秒窗口统计：
@@ -116,6 +117,7 @@ class MockPort:
         self._last_t = time.monotonic()
         self._seq = 0
         self._pending = bytearray()
+        self.writes: list[bytes] = []        # 下行记录（自检用：验证手动发送确实到达链路）
 
     @property
     def in_waiting(self) -> int:
@@ -131,6 +133,16 @@ class MockPort:
         out = bytes(self._pending[:size])
         del self._pending[:size]
         return out
+
+    def write(self, data: bytes) -> int:
+        """模拟下行：只记录不真发（真串口下才写硬件）。"""
+        self.writes.append(bytes(data))
+        if len(self.writes) > 200:
+            del self.writes[:-200]
+        return len(data)
+
+    def flush(self) -> None:
+        pass
 
     def close(self) -> None:
         self._pending.clear()
@@ -179,6 +191,9 @@ class SerialHub:
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._handle = None                # 已锁定的串口句柄（下行写在此句柄上）
+        self._send_lock = threading.Lock()  # 下行写入互斥，避免与读线程抢占
+        self._sent_bytes = 0
 
         self._state = "searching"          # searching | locked
         self._port: Optional[str] = None
@@ -212,6 +227,7 @@ class SerialHub:
                 "frame_len": self._frame_len,
                 "mock": self._mock,
                 "error": self._error,
+                "sent_bytes": self._sent_bytes,
             }
 
     def start(self) -> None:
@@ -226,6 +242,8 @@ class SerialHub:
         if self._thread:
             self._thread.join(timeout=3.0)
         self._mock_handle = None
+        with self._lock:
+            self._handle = None
 
     def set_mock_text(self, text: bool) -> None:
         """切换模拟源形态（界面改了帧格式时调用，让 mock 产出对应的字节）。
@@ -236,6 +254,41 @@ class SerialHub:
         handle = self._mock_handle
         if handle is not None:
             handle.text_mode = self._mock_text
+
+    def send(self, data: bytes) -> tuple[bool, str]:
+        """手动下行：向已锁定的接收端写入一段字节。
+
+        仅在 state=="locked" 且有句柄时允许；识别/扫描期一律拒绝，
+        以保证"扫描期只读、不写串口"的安全约束。
+        返回 (是否成功, 说明)。
+        """
+        if not isinstance(data, (bytes, bytearray)) or not data:
+            return False, "没有要发送的数据"
+        payload = bytes(data)
+        with self._lock:
+            state = self._state
+            handle = self._handle
+        if state != "locked" or handle is None:
+            return False, "接收端尚未锁定，禁止下行（扫描期只读）"
+        with self._send_lock:                      # 与读线程分离写缓冲，避免相互打断
+            try:
+                handle.write(payload)
+                try:
+                    handle.flush()
+                except Exception:
+                    pass
+            except Exception as e:
+                return False, f"发送失败：{type(e).__name__}: {e}"
+        with self._lock:
+            self._sent_bytes += len(payload)
+        self._publish({
+            "type": "send",
+            "ts": time.time(),
+            "port": self._port,
+            "n": len(payload),
+            "hex": payload.hex().upper(),
+        })
+        return True, "已发送"
 
     # -------------------------------------------------- 发布
     def _publish(self, event: dict) -> None:
@@ -356,6 +409,8 @@ class SerialHub:
     # -------------------------------------------------- 锁定后的接收
     def _pump_locked(self, handle) -> None:
         name = self._port
+        with self._lock:
+            self._handle = handle              # 记下句柄：下行 send() 用它写入
         windows: deque[Window] = deque(maxlen=REQUIRED_ACTIVE)
         try:
             while not self._stop.is_set():
@@ -376,6 +431,7 @@ class SerialHub:
 
     def _reset_to_search(self) -> None:
         with self._lock:
+            self._handle = None                    # 句柄失效：下行随之关闭
             if self._state == "searching" and self._port is None and self._frame_head is None:
                 return
             self._state = "searching"
