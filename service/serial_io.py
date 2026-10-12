@@ -36,6 +36,7 @@ import serial
 import serial.tools.list_ports as list_ports
 
 from service.protocol import CRC_ORDER, LAYOUT_25, crc16_modbus
+from service.protocol_lora import build_frame
 
 # ------------------------------------------------------------------ 常量
 BAUD = 115200               # 设计文档 3.2 节：115200 / 8 / N / 1，无流控
@@ -99,23 +100,28 @@ def _median_interval(index_lists) -> Optional[int]:
 class MockPort:
     """内置模拟串口：按固定周期吐数据，供无硬件自测。
 
-    两种形态（与上位机的帧格式配置对应）：
-      · 二进制（text_mode=False）：严格按设计文档 3.3 上行帧，多字节字段一律
+    三种形态（与上位机的帧格式配置对应，proto 由 SerialHub.set_mock_proto 切换）：
+      · "frame"（二进制）：严格按设计文档 3.3 上行帧，多字节字段一律
         大端序，CRC-16/MODBUS 覆盖偏移 0–22，CRC 字段本身低位在前（CRC_ORDER）。
         帧长与 CRC 位置直接取自 protocol.LAYOUT_25，不在两处各写一份定义。
-      · 文本（text_mode=True）：模拟"固件把数码管数值发出来"的形态，
+      · "text"（文本）：模拟"固件把数码管数值发出来"的形态，
         即一行一个裸数字 `23150\\r\\n`；数值在 23150 Hz 附近小幅抖动。
+      · "lora"（LoRa）：按《LoRa主机从机通信协议说明书》模拟总线双向流量——
+        主机轮询心跳 0x05 ↔ 从机应答 0x85，周期性从机告警上报 0xA0 + 主机确认 0xB0。
+        监听链路一并列出主从双向帧。
     """
 
     FRAME_LEN = LAYOUT_25.frame_len
     FRAME_PERIOD = 0.1
     TEXT_PERIOD = 0.1
+    LORA_PERIOD = 0.2
 
-    def __init__(self, name: str = "MOCK0", text_mode: bool = False):
+    def __init__(self, name: str = "MOCK0", proto: str = "frame"):
         self.name = name
-        self.text_mode = text_mode          # 运行中可由 SerialHub.set_mock_text 切换
+        self.proto = proto                  # 运行中可由 SerialHub.set_mock_proto 切换
         self._last_t = time.monotonic()
         self._seq = 0
+        self._lora_round = 0
         self._pending = bytearray()
         self.writes: list[bytes] = []        # 下行记录（自检用：验证手动发送确实到达链路）
 
@@ -126,10 +132,20 @@ class MockPort:
     def read(self, size: int = 4096) -> bytes:
         time.sleep(0.05)
         now = time.monotonic()
-        period = self.TEXT_PERIOD if self.text_mode else self.FRAME_PERIOD
+        if self.proto == "text":
+            period = self.TEXT_PERIOD
+        elif self.proto == "lora":
+            period = self.LORA_PERIOD
+        else:
+            period = self.FRAME_PERIOD
         while now - self._last_t >= period:
             self._last_t += period
-            self._pending += self._make_line() if self.text_mode else self._make_frame()
+            if self.proto == "text":
+                self._pending += self._make_line()
+            elif self.proto == "lora":
+                self._pending += self._make_lora()
+            else:
+                self._pending += self._make_frame()
         out = bytes(self._pending[:size])
         del self._pending[:size]
         return out
@@ -176,14 +192,35 @@ class MockPort:
         crc = crc16_modbus(bytes(body))
         return bytes(body) + crc.to_bytes(2, CRC_ORDER)
 
+    def _make_lora(self) -> bytes:
+        """LoRa 总线双向流量（只读监听视角：主从帧都会出现在线上）。
+
+        每轮模拟一次轮询交互，从机地址在 1~8 间轮转：
+          主机 0x05 心跳 → 从机 0x85 应答；
+        每 10 轮插入一次告警闭环：从机 3 上报 0xA0（载荷=告警码 0x01+数据），
+        主机回 0xB0 确认（Seq 与上报一致）。载荷结构说明书【待定义】，仅以占位字节模拟；监听侧不解释载荷。
+        """
+        self._lora_round += 1
+        self._seq = (self._seq + 1) & 0xFF
+        slave = 1 + (self._lora_round % 8)
+        out = bytearray()
+        out += build_frame(dst=slave, src=0x0000, seq=self._seq, cmd=0x05)
+        out += build_frame(dst=0x0000, src=slave, seq=self._seq, cmd=0x85)
+        if self._lora_round % 10 == 0:
+            out += build_frame(dst=0x0000, src=3, seq=self._seq, cmd=0xA0,
+                               payload=bytes([0x01, self._lora_round & 0xFF]))
+            out += build_frame(dst=3, src=0x0000, seq=self._seq, cmd=0xB0,
+                               payload=b"\xAA")
+        return bytes(out)
+
 
 # ------------------------------------------------------------------ 串口中枢
 class SerialHub:
     """自动发现并锁定接收端串口，向订阅者发布字节流与统计。"""
 
-    def __init__(self, mock: bool = False, mock_text: bool = False):
+    def __init__(self, mock: bool = False, mock_proto: str = "frame"):
         self._mock = mock
-        self._mock_text = mock_text        # 模拟源形态：文本行 or 二进制定长帧
+        self._mock_proto = mock_proto       # 模拟源形态：frame / text / lora
         self._mock_handle: Optional[MockPort] = None
         self._subscribers: list[Callable[[dict], None]] = []
         self._sub_lock = threading.Lock()
@@ -245,15 +282,16 @@ class SerialHub:
         with self._lock:
             self._handle = None
 
-    def set_mock_text(self, text: bool) -> None:
+    def set_mock_proto(self, key: str) -> None:
         """切换模拟源形态（界面改了帧格式时调用，让 mock 产出对应的字节）。
 
-        真实串口下无副作用：形态由设备固件决定，上位机只解析。
+        key 取帧格式模式（frame/text/lora）；真实串口下无副作用：
+        形态由设备固件决定，上位机只解析。
         """
-        self._mock_text = bool(text)
+        self._mock_proto = str(key) if str(key) in ("frame", "text", "lora") else "frame"
         handle = self._mock_handle
         if handle is not None:
-            handle.text_mode = self._mock_text
+            handle.proto = self._mock_proto
 
     def send(self, data: bytes) -> tuple[bool, str]:
         """手动下行：向已锁定的接收端写入一段字节。
@@ -488,7 +526,7 @@ class SerialHub:
 
     def _open(self, name: str):
         if self._mock:
-            handle = MockPort(name, text_mode=self._mock_text)
+            handle = MockPort(name, proto=self._mock_proto)
             self._mock_handle = handle
             return handle
         # 只读打开：不设置任何写操作，不使用硬件流控

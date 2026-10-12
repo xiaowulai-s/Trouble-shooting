@@ -29,21 +29,23 @@ from typing import Any, Optional
 
 from service.protocol import (DEFAULT_LAYOUT, LAYOUT_OVERRIDES, LAYOUTS, Layout,
                              build_layout)
+from service.protocol_lora import LORA_KEY, LORA_LAYOUT
 from service.protocol_text import TEXT_KEY, TEXT_LAYOUT
 from service.settings import read_settings, update_settings
 
 SETTINGS_KEY = "layout"
 
 MODE_TEXT = TEXT_KEY                                    # "text"：ASCII 文本行
+MODE_LORA = LORA_KEY                                    # "lora"：LoRa 主从通用帧（只读监听）
 MODE_CUSTOM = "custom"
 MODE_PRESETS: tuple[str, ...] = tuple(LAYOUTS)          # ("25", "14")
-MODES: tuple[str, ...] = (MODE_TEXT,) + MODE_PRESETS + (MODE_CUSTOM,)
+MODES: tuple[str, ...] = (MODE_TEXT, MODE_LORA) + MODE_PRESETS + (MODE_CUSTOM,)
 
 # 内置默认：设备当前固件发出来的就是文本行，故默认走文本链路；
 # 两套二进制定长帧仍保留在列表里，选中即可回归旧协议。
 DEFAULT_MODE = MODE_TEXT
-# 命令行 --proto 的合法取值（text 也允许显式指定，便于自检与临时试验）
-PROTO_CHOICES: tuple[str, ...] = (MODE_TEXT,) + MODE_PRESETS
+# 命令行 --proto 的合法取值（text/lora 也允许显式指定，便于自检与临时试验）
+PROTO_CHOICES: tuple[str, ...] = (MODE_TEXT, MODE_LORA) + MODE_PRESETS
 
 CUSTOM_DEFAULTS: dict[str, Any] = {
     "frame_len": DEFAULT_LAYOUT.frame_len,
@@ -104,9 +106,11 @@ def read_config() -> dict[str, Any]:
 
 
 def layout_from_config(cfg: dict[str, Any]) -> Layout:
-    """按配置构造布局对象；text 返回文本伪布局，custom 常数非法时抛 ValueError。"""
+    """按配置构造布局对象；text/lora 返回伪布局，custom 常数非法时抛 ValueError。"""
     if cfg["mode"] == MODE_TEXT:
         return TEXT_LAYOUT
+    if cfg["mode"] == MODE_LORA:
+        return LORA_LAYOUT
     if cfg["mode"] != MODE_CUSTOM:
         return LAYOUTS[cfg["mode"]]
     base = LAYOUTS[cfg["base"]]
@@ -132,6 +136,8 @@ def resolve_layout_choice(explicit: Optional[str] = None) -> tuple[Layout, dict[
         key = str(explicit).strip().lower()
         if key == MODE_TEXT:
             return TEXT_LAYOUT, cfg, "cli"
+        if key == MODE_LORA:
+            return LORA_LAYOUT, cfg, "cli"
         if key in MODE_PRESETS:
             return LAYOUTS[key], cfg, "cli"
     return layout_from_config(cfg), cfg, "config"
@@ -164,7 +170,8 @@ def describe(layout: Layout, cfg: dict[str, Any], source: str) -> dict[str, Any]
         "base": cfg["base"],
         "custom": dict(cfg["custom"]),
         "modes": list(MODES),
-        "kind": "text" if layout.key == MODE_TEXT else "binary",
+        "kind": ("text" if layout.key == MODE_TEXT
+                 else "lora" if layout.key == MODE_LORA else "binary"),
         "presets": [{"key": key, "title": LAYOUTS[key].title} for key in MODE_PRESETS],
         "source": source,
         "effective": {
@@ -187,8 +194,11 @@ def describe(layout: Layout, cfg: dict[str, Any], source: str) -> dict[str, Any]
 def cfg_from_scheme(scheme: Any) -> dict[str, Any]:
     """方案 → 旧版 layout 配置形态 {"mode","base","custom"}。"""
     frame = scheme.frame if isinstance(getattr(scheme, "frame", None), dict) else {}
-    if str(frame.get("kind", "text")).lower() == "text":
+    kind = str(frame.get("kind", "text")).lower()
+    if kind == "text":
         return {"mode": MODE_TEXT, "base": MODE_PRESETS[0], "custom": dict(CUSTOM_DEFAULTS)}
+    if kind == "lora":
+        return {"mode": MODE_LORA, "base": MODE_PRESETS[0], "custom": dict(CUSTOM_DEFAULTS)}
     mode = str(frame.get("mode", "")).strip().lower()
     base = str(frame.get("base", "")).strip().lower()
     return {
@@ -204,6 +214,9 @@ def layout_from_scheme(scheme: Any) -> Layout:
     常数非法时抛 ValueError（调用方负责提示）；字段表的编辑不影响切帧参数。
     """
     frame = scheme.frame if isinstance(getattr(scheme, "frame", None), dict) else {}
-    if str(frame.get("kind", "text")).lower() == "text":
+    kind = str(frame.get("kind", "text")).lower()
+    if kind == "text":
         return TEXT_LAYOUT
+    if kind == "lora":
+        return LORA_LAYOUT
     return layout_from_config(cfg_from_scheme(scheme))

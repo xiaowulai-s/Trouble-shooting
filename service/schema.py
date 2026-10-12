@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 from service.analysis import FILTER_TYPES, RAW_TYPES, DEFAULT_RAW_TYPE
 from service.protocol import DEFAULT_LAYOUT, LAYOUTS
+from service.protocol_lora import LORA_KEY
 from service.protocol_text import DEFAULT_KEY, TEXT_KEY
 from service.settings import (read_active_scheme, read_settings,
                              save_active_scheme, update_settings)
@@ -42,6 +43,7 @@ MAX_FIELD_NAME = 24
 BUILTIN_TEXT = "GD300-文本行"
 BUILTIN_25 = "GD300-25 字节"
 BUILTIN_14 = "GD300-14 字节"
+BUILTIN_LORA = "GD300-LoRa主从"
 DEFAULT_COLOR = "#2E7CF6"
 
 _ID_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
@@ -223,7 +225,7 @@ def normalize_field(raw: Any, index: int = 0) -> FieldSpec:
 def _normalize_frame(raw: Any) -> dict[str, Any]:
     data = raw if isinstance(raw, dict) else {}
     kind = str(data.get("kind", "text")).strip().lower()
-    if kind not in ("text", "binary"):
+    if kind not in ("text", "binary", "lora"):
         kind = "text"
     custom_raw = data.get("custom")
     custom_raw = custom_raw if isinstance(custom_raw, dict) else {}
@@ -239,6 +241,8 @@ def _normalize_frame(raw: Any) -> dict[str, Any]:
     mode = str(data.get("mode", "")).strip().lower()
     if kind == "text":
         mode = TEXT_KEY
+    elif kind == "lora":
+        mode = LORA_KEY
     elif mode not in (base, "custom"):
         mode = base
     return {"kind": kind, "mode": mode, "base": base, "custom": custom}
@@ -363,14 +367,45 @@ def _builtin_from_layout(layout, name: str) -> Scheme:
     )
 
 
+def _builtin_lora() -> Scheme:
+    """LoRa 主从链路（只读监听）的内置方案。
+
+    表格列 = 方向/目标/源/Seq/命令/长度/载荷，全部取自解码器的 values 键；
+    均为元数据（协议未定义载荷结构），曲线默认关闭。
+    """
+    def fld(fid: str, key: str, name: str) -> FieldSpec:
+        spec = _make_field(fid, {"type": "key", "key": key}, name, "", 0)
+        spec.visible = {"table": True, "curve": False}
+        return spec
+
+    return Scheme(
+        name=BUILTIN_LORA, builtin=True,
+        frame={"kind": "lora", "mode": LORA_KEY, "base": LAYOUTS_KEY_DEFAULT,
+               "custom": _default_custom()},
+        fields=[
+            fld("dir", "DIR", "方向"),
+            fld("dst", "DST", "目标地址"),
+            fld("src", "SRC", "源地址"),
+            fld("seq", "SEQ", "Seq"),
+            fld("cmd", "CMD_NAME", "命令"),
+            fld("plen", "LEN", "载荷长度"),
+            fld("payload", "PAYLOAD", "载荷HEX"),
+        ],
+        curve={"window_s": 60, "max_points": 20000, "decimate": "minmax"},
+        storage={"mode": "session", "flush_ms": 500},
+    )
+
+
 BUILTINS: dict[str, Scheme] = {
     BUILTIN_TEXT: _builtin_text(),
     BUILTIN_25: _builtin_from_layout(LAYOUTS[LAYOUTS_KEY_DEFAULT], BUILTIN_25),
     BUILTIN_14: _builtin_from_layout(
         LAYOUTS["14"] if "14" in LAYOUTS else LAYOUTS[LAYOUTS_KEY_DEFAULT], BUILTIN_14),
+    BUILTIN_LORA: _builtin_lora(),
 }
 
-_BUILTIN_BY_LAYOUT = {TEXT_KEY: BUILTIN_TEXT, LAYOUTS_KEY_DEFAULT: BUILTIN_25, "14": BUILTIN_14}
+_BUILTIN_BY_LAYOUT = {TEXT_KEY: BUILTIN_TEXT, LAYOUTS_KEY_DEFAULT: BUILTIN_25,
+                      "14": BUILTIN_14, LORA_KEY: BUILTIN_LORA}
 
 
 def builtin_for_layout(layout_key: str) -> Scheme:

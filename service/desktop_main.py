@@ -305,7 +305,7 @@ def main() -> int:
     app = create_app(hub, WsHub(), explicit_layout=args.proto)
     info = app.state.gd300
     layout = info["layout"]
-    hub.set_mock_text(layout.key == MODE_TEXT)          # 模拟源与链路保持一致
+    hub.set_mock_proto(layout.key)                      # 模拟源与链路保持一致
     server, thread = _start_server(app, port)
     _log(f"[GD300] service starting on {HOST}:{port}")
     if layout.key == MODE_TEXT:

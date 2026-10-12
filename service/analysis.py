@@ -357,7 +357,12 @@ class Analyzer:
                 value = eng
                 filtered = False
 
-            text = format_number(value, getattr(f, "decimals", 0))
+            if isinstance(rv, str):
+                # 字符串值（如 LoRa 的方向/命令名/载荷 HEX，或文本链路的非数字值）
+                # 直接进表格；不参与换算/滤波/报警，曲线侧 value 保持 None。
+                text = rv
+            else:
+                text = format_number(value, getattr(f, "decimals", 0))
             verdict = judge_alarm(f, value, self._alarms.setdefault(f.id, {}), ts)
             if verdict["changed"]:
                 alarms.append(alarm_event(f, value, verdict))

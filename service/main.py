@@ -36,11 +36,12 @@ from fastapi.staticfiles import StaticFiles
 
 from service import schema as scheme_store
 from service.analysis import COL_TS, Analyzer, format_number
-from service.layout_config import (MODE_TEXT, PROTO_CHOICES, cfg_from_scheme,
-                                   describe, layout_from_config,
+from service.layout_config import (MODE_LORA, MODE_TEXT, PROTO_CHOICES,
+                                   cfg_from_scheme, describe, layout_from_config,
                                    layout_from_scheme, resolve_layout_choice,
                                    save_config)
 from service.protocol import Decoder, _ts_text
+from service.protocol_lora import LoraDecoder
 from service.protocol_text import TextLineDecoder
 from service.serial_io import SerialHub
 from service.settings import (APP_VERSION, DEFAULT_APP_NAME, MAX_APP_NAME,
@@ -52,13 +53,21 @@ STATIC_DIR = pathlib.Path(__file__).resolve().parent.parent / "web" / "static"
 
 
 def _make_decoder(layout) -> object:
-    """按生效布局构造解析器：文本链路走 TextLineDecoder，其余走二进制 Decoder。
+    """按生效布局构造解析器：文本走 TextLineDecoder，LoRa 走 LoraDecoder，
+    其余走二进制 Decoder。
 
-    两条链路对外接口一致（feed / snapshot / layout），上层不必区分。
+    三条链路对外接口一致（feed / snapshot / layout），上层不必区分。
     """
     if layout.key == MODE_TEXT:
         return TextLineDecoder()
+    if layout.key == MODE_LORA:
+        return LoraDecoder()
     return Decoder(layout)
+
+
+def _kind_for_layout(layout_key: str) -> str:
+    """链路 key → 方案 frame.kind（text/lora 同名，其余都是 binary）。"""
+    return layout_key if layout_key in (MODE_TEXT, MODE_LORA) else "binary"
 
 
 def _raw_bytes(frame) -> bytes | None:
@@ -83,7 +92,7 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
         layout = resolve_layout_choice(explicit_layout)[0]
         source = "cli"
         # 命令行强制换了链路时，字段表也必须跟着换，否则取值来源对不上
-        if (layout.key == MODE_TEXT) != (scheme.frame.get("kind") == "text"):
+        if scheme.frame.get("kind") != _kind_for_layout(layout.key):
             scheme = scheme_store.builtin_for_layout(layout.key)
     else:
         layout = layout_from_scheme(scheme)
@@ -181,7 +190,7 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
         state["cfg"] = cfg_from_scheme(scheme_obj)
         state["source"] = "config"
         state["decoder"] = _make_decoder(new_layout)     # 换实例：统计清零、rev 归零
-        hub.set_mock_text(new_layout.key == MODE_TEXT)   # 模拟源跟着换形态
+        hub.set_mock_proto(new_layout.key)               # 模拟源跟着换形态
         ws_hub.broadcast({"type": "layout", "stats": _stats_view(), "text": note})
         return _stats_view()
 
@@ -431,8 +440,10 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
             state["cfg"] = new_cfg
             state["source"] = "config"
             decoder = state["decoder"]
-            if new_layout.key == MODE_TEXT or decoder.layout.key == MODE_TEXT:
-                # 文本链路 ↔ 二进制链路：解析器类型不同，必须换实例（清空旧统计）
+            if (new_layout.key != decoder.layout.key
+                    or new_layout.key in (MODE_TEXT, MODE_LORA)):
+                # 链路类型变了（文本/LoRa 的解析器与二进制不同类）：必须换实例
+                # （清空旧统计）；同为二进制时走 set_layout 就地重切。
                 state["decoder"] = _make_decoder(new_layout)
                 ws_hub.broadcast({"type": "layout", "stats": _stats_view(),
                                   "text": f"帧格式已切换：{new_layout.title}"})
@@ -441,12 +452,12 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
                 ws_hub.broadcast({"type": "layout", "stats": _stats_view(),
                                   "text": f"帧格式已切换：{new_layout.title}"})
             # 链路类型变了，字段表口径也要跟着换（否则取值来源对不上）
-            if (new_layout.key == MODE_TEXT) != (state["scheme"].frame.get("kind") == "text"):
+            if state["scheme"].frame.get("kind") != _kind_for_layout(new_layout.key):
                 state["scheme"] = scheme_store.builtin_for_layout(new_layout.key)
                 state["analyzer"].set_fields(state["scheme"].fields)
                 ws_hub.broadcast({"type": "layout", "stats": _stats_view(),
                                   "text": f"字段表已随链路切到：{state['scheme'].name}"})
-            hub.set_mock_text(new_layout.key == MODE_TEXT)   # 模拟源跟着换形态
+            hub.set_mock_proto(new_layout.key)               # 模拟源跟着换形态
 
         return JSONResponse({"ok": True, "app_name": name, "layout": _layout_view(),
                              "scheme": state["scheme"].name})
@@ -486,12 +497,15 @@ def main() -> None:
     info = app.state.gd300
     layout = info["layout"]
     source = "命令行 --proto" if info["source"] == "cli" else "界面配置"
-    hub.set_mock_text(layout.key == MODE_TEXT)          # 模拟源与链路保持一致
+    hub.set_mock_proto(layout.key)                      # 模拟源与链路保持一致
 
     mode = "模拟数据源" if args.mock else "真实串口（自动识别，识别前只读不写）"
-    detail = ("按 \\n 切行、解析裸数字或 KEY=VALUE（如 23150 / F=23150）"
-              if layout.key == MODE_TEXT
-              else f"CRC 覆盖偏移 0–{layout.crc_covers - 1}")
+    if layout.key == MODE_TEXT:
+        detail = "按 \\n 切行、解析裸数字或 KEY=VALUE（如 23150 / F=23150）"
+    elif layout.key == MODE_LORA:
+        detail = "只读监听：AA55 变长帧，CRC16(MODBUS) 覆盖目标地址→载荷末"
+    else:
+        detail = f"CRC 覆盖偏移 0–{layout.crc_covers - 1}"
     print(f"[GD300] 数据源: {mode}")
     print(f"[GD300] 上行链路: {layout.title}（来源：{source}），{detail}")
     print(f"[GD300] 当前方案: {info['state']['scheme'].name}")

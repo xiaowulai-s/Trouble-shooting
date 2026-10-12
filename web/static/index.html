@@ -847,6 +847,7 @@
     if (!s) return "";
     var f = s.frame || {};
     if (f.kind === "text") return "ASCII 文本行 · " + (s.fields || []).length + " 个字段";
+    if (f.kind === "lora") return "LoRa 主从通用帧（只读监听） · " + (s.fields || []).length + " 个字段";
     var c = f.custom || {};
     return "二进制定长帧 " + c.frame_len + " 字节 · CRC 偏移 " + c.crc_offset
       + " · " + (s.fields || []).length + " 个字段";
@@ -863,7 +864,7 @@
       var opt = document.createElement("option");
       opt.value = s.name;
       opt.textContent = s.name + (s.builtin ? "（内置）" : "")
-        + " · " + (s.kind === "text" ? "文本行" : s.mode) + " · " + s.fields + " 字段";
+        + " · " + (s.kind === "text" ? "文本行" : (s.kind === "lora" ? "LoRa" : s.mode)) + " · " + s.fields + " 字段";
       selScheme.appendChild(opt);
     });
     if (active) selScheme.value = active;
@@ -997,14 +998,15 @@
     var c = frame.custom || {};
     inpSchemeName.value = activeScheme.builtin
       ? (activeScheme.name + " 副本") : activeScheme.name;
-    inpSchemeKind.value = (frame.kind === "text") ? "ASCII 文本行" : "二进制定长帧";
+    inpSchemeKind.value = (frame.kind === "text") ? "ASCII 文本行"
+      : (frame.kind === "lora") ? "LoRa 主从通用帧（只读监听）" : "二进制定长帧";
     selLayoutBase.value = frame.base || "25";
     inpFrameLen.value = c.frame_len != null ? c.frame_len : "";
     inpCrcOffset.value = c.crc_offset != null ? c.crc_offset : "";
     inpCrcCovers.value = c.covers != null ? c.covers : "";
     selCrcOrder.value = c.crc_order || "little";
     selByteOrder.value = c.byte_order || "big";
-    frameBox.classList.toggle("hidden", frame.kind === "text");
+    frameBox.classList.toggle("hidden", frame.kind === "text" || frame.kind === "lora");
     fieldBody.innerHTML = "";
     (activeScheme.fields || []).forEach(addFieldRow);
     if (!fieldBody.childElementCount) addFieldRow(null);
