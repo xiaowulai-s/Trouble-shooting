@@ -42,6 +42,12 @@ BYTE_ORDER = "little"        # 多字节字段小端
 PAYLOAD_SHOW = 12            # 载荷 HEX 最多展示的字节数，超出以 … 截断
 KEEP_FRAMES = 200
 
+# 地址与命令区间（说明书第 2/4 章）
+MASTER_ADDR = 0x0000
+BROADCAST_ADDR = 0xFFFF
+CMD_RESP_MIN, CMD_RESP_MAX = 0x81, 0x87      # 从机应答区间
+CMD_REPORT_MIN, CMD_REPORT_MAX = 0xA0, 0xA1  # 从机主动上报区间
+
 # 命令码 → 展示名（说明书第 4 章修正后）
 LORA_CMDS: dict[int, str] = {
     0x01: "读数据", 0x02: "读参数", 0x03: "写参数", 0x04: "控制命令",
@@ -181,6 +187,8 @@ class LoraDecoder:
         self._last_ts: Optional[float] = None
         self._recent: deque[LoraFrame] = deque(maxlen=keep)
         self._rev = 0                      # 链路版本号：清空后自增，界面据此清表
+        # 按地址聚合的节点状态：src/dst → {frames,last_ts,last_cmd,req,resp,report}
+        self._nodes: dict[int, dict[str, Any]] = {}
 
     # -------------------------------------------------- 解析
     def feed(self, chunk: bytes, ts: Optional[float] = None) -> list[LoraFrame]:
@@ -220,6 +228,7 @@ class LoraDecoder:
                 body = candidate[CRC_START_OFFSET:-2]
                 if crc_rx == crc16_modbus(body):
                     frame = self._build(candidate, now, crc_rx)
+                    self._track(frame)
                     out.append(frame)
                     self._recent.append(frame)
                     self._frames_ok += 1
@@ -270,6 +279,31 @@ class LoraDecoder:
         ]
         return frame
 
+    def _node(self, addr: int) -> dict[str, Any]:
+        return self._nodes.setdefault(addr, {
+            "src": addr, "frames": 0, "last_ts": 0.0, "last_cmd": 0,
+            "req": 0, "resp": 0, "report": 0,
+        })
+
+    def _track(self, f: LoraFrame) -> None:
+        """按地址聚合节点状态（监听侧口径）：
+
+        · frames/last_ts/last_cmd：谁在发帧、最近一次是什么；
+        · req：主机点对点请求，记到**被点名从机**头上（广播不计入，无应答语义）；
+        · resp：该从机的 0x81~0x87 应答数；req/resp 相除即点对点响应率；
+        · report：该从机的 0xA0/0xA1 主动上报数。
+        """
+        node = self._node(f.src)
+        node["frames"] += 1
+        node["last_ts"] = f.ts
+        node["last_cmd"] = f.cmd
+        if f.src == MASTER_ADDR and f.dst != BROADCAST_ADDR:
+            self._node(f.dst)["req"] += 1
+        if CMD_RESP_MIN <= f.cmd <= CMD_RESP_MAX:
+            node["resp"] += 1
+        if CMD_REPORT_MIN <= f.cmd <= CMD_REPORT_MAX:
+            node["report"] += 1
+
     # -------------------------------------------------- 读取
     def columns(self) -> list[str]:
         """解码器口径的列名（界面上实际以方案字段表为准）。"""
@@ -300,6 +334,17 @@ class LoraDecoder:
                 "last_ts": self._last_ts,
                 "pending": len(self._buf),
             }
+            now = time.time()
+            # 节点聚合（在线判定与展示由界面做，这里只给原始计数与最后帧时刻）
+            data["nodes"] = sorted(
+                ({
+                    "src": n["src"],
+                    "frames": n["frames"],
+                    "age_s": round(now - n["last_ts"], 1) if n["last_ts"] else None,
+                    "last_cmd": n["last_cmd"],
+                    "req": n["req"], "resp": n["resp"], "report": n["report"],
+                } for n in self._nodes.values()),
+                key=lambda x: x["src"])
             if recent > 0:
                 data["recent"] = [f.to_payload() for f in list(self._recent)[-recent:]]
         return data
@@ -315,4 +360,5 @@ class LoraDecoder:
             self._bytes_dropped = 0
             self._last_ts = None
             self._recent.clear()
+            self._nodes.clear()
             self._rev += 1

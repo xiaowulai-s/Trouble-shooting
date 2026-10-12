@@ -222,6 +222,17 @@
   tr.hit td { background: rgba(46, 124, 246, .22); }
   td.alarm-cell { color: var(--status-alarm); }
 
+  /* ---------- LoRa 从机状态 / 告警行 ---------- */
+  .node-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(178px, 1fr)); gap: 8px; }
+  .node { border: 1px solid #c9ced6; border-radius: 8px; padding: 6px 10px; font-size: 12px; line-height: 1.55; }
+  .node b { margin-right: 6px; }
+  .node .st { font-weight: 600; }
+  .node.on { border-color: #2e9e5b; background: rgba(46, 158, 91, .08); }
+  .node.on .st { color: #2e9e5b; }
+  .node.off { opacity: .62; }
+  .node.off .st { color: #b3452e; }
+  tr.row-report > td { background: rgba(214, 69, 69, .07); }   /* 0xA0/A1 上报行 */
+
   /* ---------- 手动下行 ---------- */
   .send-panel { flex: 0 0 auto; }
   .send-body { display: flex; align-items: center; gap: 8px; padding: 10px 14px; flex-wrap: wrap; }
@@ -358,10 +369,17 @@
     </section>
   </div>
 
+  <section id="loraNodes" class="panel hidden">
+    <div class="panel-head">
+      <span class="caption">从机状态 <span class="proto-stats">（监听聚合：10s 无帧视为离线；请求/应答为点对点计数，广播不计入）</span></span>
+    </div>
+    <div id="nodeGrid" class="node-grid"><span class="hint">等待 LoRa 流量…</span></div>
+  </section>
+
   <section class="panel send-panel">
     <div class="panel-head">
       <span class="caption">手动下行 <span id="sendState" class="tag">未锁定</span>
-        <span class="proto-stats">（仅锁定后开放，扫描期只读不写）</span></span>
+        <span class="proto-stats">（仅锁定后开放，扫描期只读不写；LoRa 链路禁止写入）</span></span>
     </div>
     <div class="send-body">
       <select id="selSendMode">
@@ -405,6 +423,12 @@
         <button id="btnEditFields">编辑字段表…</button>
       </div>
       <div id="schemeHint" class="hint"></div>
+    </div>
+
+    <div class="dialog-sep"></div>
+    <div>
+      <label><input id="chkArchive" type="checkbox" /> 长期归档（帧原始记录，按天写入 archives/ 目录，超出上限自动删最旧）</label>
+      <div id="archiveList" class="hint" style="margin-top:6px">归档文件：—</div>
     </div>
   </div>
 </div>
@@ -708,10 +732,18 @@
 
   function updateProtoStats(s) {
     if (!s) return;
+    linkKind = s.kind || linkKind;
+    updateSendState();
     var key = (s.kind || "") + "|" + (s.layout || "") + "|" + (s.scheme || "") + "|" + s.rev;
     if (frameRevKey !== null && key !== frameRevKey) resetFrameTable();
     frameRevKey = key;
     protoLayout.textContent = s.scheme || s.layout_title || ("布局 " + s.layout);
+    if (s.kind === "lora" && s.nodes) {
+      loraPanel.classList.remove("hidden");
+      renderNodes(s.nodes);
+    } else {
+      loraPanel.classList.add("hidden");
+    }
     if (s.kind === "text") {
       // 文本链路没有 CRC / 重同步概念：统计条按"行"的口径显示
       protoStats.textContent = "有效行 " + fmt(s.frames_ok) + " ｜ 无效行 " + fmt(s.crc_err)
@@ -722,6 +754,34 @@
         + " ｜ 待切 " + (s.pending || 0);
     }
     setColumns(s.columns);
+  }
+
+  /* ---------------- LoRa 从机状态（仅 lora 链路显示） ---------------- */
+  var nodeGrid = document.getElementById("nodeGrid");
+  var loraPanel = document.getElementById("loraNodes");
+  var ONLINE_S = 10;                             // 无帧超过该秒数视为离线
+
+  function hex4(v) { return ("0000" + Number(v).toString(16).toUpperCase()).slice(-4); }
+  function hex2(v) { return ("0" + Number(v).toString(16).toUpperCase()).slice(-2); }
+
+  function renderNodes(nodes) {
+    var html = "";
+    (nodes || []).forEach(function (n) {
+      var isMaster = (n.src === 0);
+      var online = (n.age_s != null && n.age_s <= ONLINE_S);
+      var rate = (n.req > 0) ? Math.round(100 * n.resp / n.req) : null;
+      html += '<div class="node ' + (online ? "on" : "off") + '">'
+        + '<b>' + (isMaster ? "主机 " : "从机 ") + hex4(n.src) + '</b>'
+        + '<span class="st">' + (online ? "在线" : (n.age_s == null ? "未响应" : "超时")) + '</span>'
+        + '<div>' + (n.age_s == null ? "未见帧"
+            : (n.age_s + "s 前 · 0x" + hex2(n.last_cmd))) + '</div>'
+        + '<div>' + (isMaster
+            ? ("点名 " + n.req + " 次")
+            : ("请求 " + n.req + " / 应答 " + n.resp
+              + (rate == null ? "" : "（" + rate + "%）") + " · 上报 " + n.report)) + '</div>'
+        + '</div>';
+    });
+    nodeGrid.innerHTML = html || '<span class="hint">暂无从机流量</span>';
   }
 
   function appendFrames(items) {
@@ -735,6 +795,7 @@
     items.forEach(function (f) {
       var tr = document.createElement("tr");
       if (f.ts != null) tr.dataset.ts = f.ts;
+      if (f.cmd === 160 || f.cmd === 161) tr.classList.add("row-report");   // 0xA0/A1 上报行着色（仅展示）
       var flds = f.fields || null;                  // 首屏 /api/protocol 的 recent 无分析结果
       (f.cells || []).forEach(function (v, ci) {
         var td = document.createElement("td");
@@ -799,6 +860,7 @@
     inpAppName.value = currentName;
     setHint("最多 " + MAX_APP_NAME + " 个字符，保存后立即生效并写入本地配置", "");
     loadSchemes();
+    loadArchive();
     settingsMask.classList.remove("hidden");
     inpAppName.focus();
     inpAppName.select();
@@ -814,6 +876,35 @@
   document.addEventListener("keydown", function (e) {
     if (e.key === "Escape" && !settingsMask.classList.contains("hidden")) closeSettings();
   });
+
+  /* ---------------- 长期归档（帧原始记录） ---------------- */
+  var chkArchive = document.getElementById("chkArchive");
+  var archiveList = document.getElementById("archiveList");
+
+  function loadArchive() {
+    fetch("/api/archive").then(function (r) { return r.json(); })
+      .then(function (a) {
+        chkArchive.checked = !!a.enabled;
+        var files = a.files || [];
+        if (!files.length) { archiveList.textContent = "归档文件：—"; return; }
+        archiveList.innerHTML = "归档文件：" + files.map(function (f) {
+          return '<a href="/api/archive/download?name=' + encodeURIComponent(f.name)
+            + '" download>' + esc(f.name) + "（" + (f.size / 1024).toFixed(1) + " KB）</a>";
+        }).join("、");
+      })
+      .catch(function () { archiveList.textContent = "归档文件：加载失败"; });
+  }
+
+  function saveArchive() {
+    fetch("/api/archive", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: chkArchive.checked })
+    }).then(function (r) { return r.json(); })
+      .then(function (b) {
+        if (b.ok) pushEvent(chkArchive.checked ? "长期归档已开启" : "长期归档已关闭");
+      })
+      .catch(function () {});
+  }
 
   btnResetName.addEventListener("click", function () {
     inpAppName.value = DEFAULT_APP_NAME;
@@ -833,6 +924,7 @@
         inpAppName.value = body.app_name;
         setHint("已保存，界面与窗口标题栏已同步", "ok");
         pushEvent("系统名称已改为「" + body.app_name + "」");
+        saveArchive();                                   // 归档开关随保存一起提交
         setTimeout(closeSettings, 700);
       })
       .catch(function () { setHint("保存失败：本地服务不可用", "error"); })
@@ -1602,8 +1694,23 @@
 
   /* ---------------- 手动下行 ---------------- */
   var lockState = "searching";
+  var linkKind = "";                            // 当前链路类型（binary/text/lora）
+  var sendUiSig = null;                         // 上次渲染的 (链路, 锁定) 组合，避免逐帧刷 DOM
 
   function updateSendState() {
+    var sig = linkKind + "|" + lockState;
+    if (sig === sendUiSig) return;
+    sendUiSig = sig;
+    if (linkKind === "lora") {
+      // LoRa 只读监听：写入会向真实主从网络注入帧，整组控件停用
+      btnSend.disabled = true;
+      inpSendData.disabled = selSendMode.disabled = chkSendNewline.disabled = true;
+      sendState.textContent = "LoRa 只读";
+      sendState.className = "tag";
+      setSendHint("LoRa 链路只读监听：禁止手动下行", "");
+      return;
+    }
+    inpSendData.disabled = selSendMode.disabled = chkSendNewline.disabled = false;
     var locked = (lockState === "locked");
     btnSend.disabled = !locked;
     sendState.textContent = locked ? "已锁定" : "未锁定";

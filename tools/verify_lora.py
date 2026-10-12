@@ -165,6 +165,83 @@ def test_api() -> None:
     check("B13 导出采样 CSV", st == 200 and head.startswith("\ufeff") and "," in head,
           head.splitlines()[0][:100] if head else "-")
 
+    # ---- LoRa 只读监听：手动下行必须被拦截（写入会向真实主从网络注入帧） ----
+    payload = {"mode": "hex", "data": "AA 55 00 01 05"}
+    st, snd = call("POST", "/api/send", payload)
+    check("B14 LoRa 链路禁止手动下行", st == 409 and not snd.get("ok"),
+          f"HTTP {st} err={str(snd.get('error', ''))[:48]}")
+
+    call("POST", "/api/schemes/" + urllib.parse.quote("GD300-文本行") + "/activate")
+    st, snd = call("POST", "/api/send", payload)
+    check("B15 文本链路可下行（拦截仅限 LoRa）", st == 200 and snd.get("ok"), f"HTTP {st}")
+
+    call("POST", "/api/schemes/" + urllib.parse.quote("GD300-LoRa主从") + "/activate")
+    st, snd = call("POST", "/api/send", payload)
+    check("B16 切回 LoRa 后仍拦截", st == 409 and not snd.get("ok"), f"HTTP {st}")
+
+    # ---- 从机节点聚合（在线/问答配对/上报计数，监听侧口径） ----
+    # B16 刚换过解码器：从机节点要等主机轮询到才出现（每从机约 1.6s），
+    # 0xA0 上报每 10 轮（约 16s）一次——两者都轮询等待，截止 25s。
+    time.sleep(2.0)
+    deadline = time.time() + 25.0
+    pairs: dict[str, tuple[int, int]] = {}
+    reports: dict[str, int] = {}
+    while time.time() < deadline:
+        _, proto_n = call("GET", "/api/protocol")
+        nodes = {n["src"]: n for n in proto_n.get("nodes", [])}
+        pairs = {hex(k): (v["req"], v["resp"]) for k, v in nodes.items() if k != 0}
+        reports = {hex(k): v["report"] for k, v in nodes.items() if v["report"] > 0}
+        if pairs and reports:
+            break
+        time.sleep(1.0)
+    check("B17 问答配对计数（主机点名→从机应答）",
+          any(r > 0 for r, _ in pairs.values())
+          and any(p > 0 for _, p in pairs.values()),
+          str(pairs)[:110])
+    check("B18 告警/事件上报计数", bool(reports), str(reports)[:80])
+
+    # ---- 长期归档：帧原始记录按天 JSONL（可选，默认关闭，用户确认口径） ----
+    _, arc0 = call("GET", "/api/archive")
+    check("B19 归档默认关闭", arc0.get("enabled") is False
+          and isinstance(arc0.get("max_mb"), int),
+          f"enabled={arc0.get('enabled')} max_mb={arc0.get('max_mb')}")
+
+    _, arc_on = call("POST", "/api/archive", {"enabled": True})
+    today_name = time.strftime("监听_%Y%m%d") + ".jsonl"
+    time.sleep(2.5)                                    # 等 mock 流量写几批
+    _, arc1 = call("GET", "/api/archive")
+    files1 = {f["name"]: f["size"] for f in (arc1.get("files") or [])}
+    check("B20 开启归档产出当日文件", arc_on.get("ok") is True
+          and files1.get(today_name, 0) > 0,
+          f"ok={arc_on.get('ok')} files={sorted(files1)[-3:]}")
+
+    st, blob = call("GET", "/api/archive/download?name="
+                    + urllib.parse.quote(today_name), raw=True)
+    lines = blob.decode("utf-8", "replace").splitlines()
+    recs = []
+    for ln in lines[:5]:
+        try:
+            recs.append(json.loads(ln))
+        except ValueError:
+            pass
+    ok_fmt = st == 200 and bool(recs) and all(
+        isinstance(r, dict) and "ts" in r
+        and r.get("kind") in ("lora", "text", "binary")
+        and ("hex" in r or "text" in r) for r in recs)
+    check("B21 帧原始记录格式合法", ok_fmt,
+          f"HTTP {st} rows={len(lines)} "
+          f"sample={str(recs[0])[:70] if recs else '-'}")
+
+    _, arc_off = call("POST", "/api/archive", {"enabled": False})
+    time.sleep(2.0)                                    # 关闭后两次采样，大小应不变
+    _, arc2 = call("GET", "/api/archive")
+    size1 = {f["name"]: f["size"] for f in (arc2.get("files") or [])}.get(today_name, 0)
+    time.sleep(2.0)
+    _, arc3 = call("GET", "/api/archive")
+    size2 = {f["name"]: f["size"] for f in (arc3.get("files") or [])}.get(today_name, 0)
+    check("B22 关闭归档后停止写入", arc_off.get("ok") is True and size1 == size2,
+          f"size {size1} -> {size2}")
+
 
 def main() -> None:
     test_parser()

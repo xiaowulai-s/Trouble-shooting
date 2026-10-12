@@ -31,11 +31,13 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from service import schema as scheme_store
 from service.analysis import COL_TS, Analyzer, format_number
+from service.archive import (FILE_RE, ArchiveStore, read_archive_cfg,
+                             save_archive_cfg)
 from service.layout_config import (MODE_LORA, MODE_TEXT, PROTO_CHOICES,
                                    cfg_from_scheme, describe, layout_from_config,
                                    layout_from_scheme, resolve_layout_choice,
@@ -100,6 +102,7 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
 
     cfg = cfg_from_scheme(scheme)
     store = SampleStore(flush_ms=scheme.storage.get("flush_ms", 500))
+    archive_store = ArchiveStore(enabled=read_archive_cfg()["enabled"])
     state = {
         "cfg": cfg,
         "source": source,
@@ -159,9 +162,17 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
         sample_store = state["store"]
         items: list[dict] = []
         alarms: list[dict] = []
+        archive_recs: list[dict] = []     # 长期归档：帧原始记录（可选，默认关闭）
+        akind = _kind_for_layout(state["decoder"].layout.key)
         for frame in frames:
             payload = frame.to_payload()
             ts = payload.get("ts") or time.time()
+            raw_hex = getattr(frame, "raw_hex", None)
+            raw_text = getattr(frame, "raw_text", None)
+            if raw_hex:
+                archive_recs.append({"ts": ts, "kind": akind, "hex": raw_hex})
+            elif raw_text:
+                archive_recs.append({"ts": ts, "kind": "text", "text": raw_text})
             result = analyzer.process(ts, values=getattr(frame, "values", None),
                                       raw=_raw_bytes(frame))
             payload["fields"] = result["fields"]
@@ -178,6 +189,8 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
                                               ev["limit"], ev["text"])
                     alarms.append({**ev, "ts": ts})
 
+        if archive_recs:
+            archive_store.append(archive_recs)
         ws_hub.broadcast({"type": "frames", "items": items, "stats": _stats_view()})
         if alarms:
             ws_hub.broadcast({"type": "alarm", "items": alarms})
@@ -206,6 +219,7 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
         finally:
             hub.stop()
             store.close_and_clear()                       # 退出即清
+            archive_store.close()
 
     app = FastAPI(title=f"{read_app_name()} {APP_VERSION}", lifespan=lifespan)
     # 桌面壳要打印"当前帧格式来源"，把生效结果挂在 app 上供其读取
@@ -323,7 +337,16 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
 
     @app.post("/api/send")
     async def api_send(payload: dict):
-        """手动下行：仅在接收端已锁定时允许（扫描期只读，禁止写串口）。"""
+        """手动下行：仅在接收端已锁定时允许（扫描期只读，禁止写串口）。
+
+        LoRa 链路一律禁止：只读监听定位下写串口 = 向真实主从网络注入帧
+        （冒充主机或从机），与扫描期同一 409 口径。
+        """
+        if state["decoder"].layout.key == MODE_LORA:
+            return JSONResponse(
+                {"ok": False,
+                 "error": "LoRa 链路为只读监听：禁止手动下行（写入会向真实主从网络注入帧）"},
+                status_code=409)
         body = payload if isinstance(payload, dict) else {}
         mode = str(body.get("mode", "text")).strip().lower()
         raw_text = str(body.get("data", ""))
@@ -348,6 +371,35 @@ def create_app(hub: SerialHub, ws_hub: WsHub, explicit_layout: str | None = None
             return JSONResponse({"ok": False, "error": message}, status_code=409)
         return JSONResponse({"ok": True, "bytes": len(data), "mode": mode,
                              "hex": data.hex().upper(), "message": message})
+
+    # -------------------------------------------------- 长期归档（帧原始记录）
+    @app.get("/api/archive")
+    async def api_archive():
+        """归档配置 + 文件列表（按天 JSONL，从旧到新）。"""
+        cfg = read_archive_cfg()
+        return JSONResponse({**cfg, "dir": str(archive_store.directory()),
+                             "files": archive_store.list_files()})
+
+    @app.post("/api/archive")
+    async def api_archive_set(payload: dict):
+        """开关归档（/调 max_mb）：合并写入 settings.json 并即时生效。"""
+        body = payload if isinstance(payload, dict) else {}
+        try:
+            cfg = save_archive_cfg(body)
+        except ValueError as e:
+            return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+        archive_store.set_enabled(cfg["enabled"])
+        return JSONResponse({"ok": True, **cfg})
+
+    @app.get("/api/archive/download")
+    async def api_archive_download(name: str):
+        """下载归档文件（文件名白名单校验，防目录穿越）。"""
+        if not FILE_RE.match(name or ""):
+            return JSONResponse({"ok": False, "error": "文件名非法"}, status_code=400)
+        path = archive_store.directory() / name
+        if not path.is_file():
+            return JSONResponse({"ok": False, "error": "文件不存在"}, status_code=404)
+        return FileResponse(path, filename=name, media_type="application/octet-stream")
 
     # -------------------------------------------------- 方案 CRUD
     @app.get("/api/schemes")
